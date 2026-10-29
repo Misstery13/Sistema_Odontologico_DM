@@ -1,0 +1,57 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: odonto
+      POSTGRES_USER: odonto
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-odonto}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U odonto"]
+      interval: 2s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+
+  backend:
+    build: ./backend
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-odonto}
+      SECRET_KEY: ${SECRET_KEY:-cambiar-en-produccion}
+      DEBUG: "0"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  payments:
+    build: ./payments
+    environment:
+      DATABASE_URL: postgres://odonto:${POSTGRES_PASSWORD:-odonto}@db:5432/odonto
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  caddy:
+    build: ./frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+      - payments
+
+  # Escaneo OWASP: docker compose --profile zap run --rm zap
+  zap:
+    image: ghcr.io/zaproxy/zaproxy:stable
+    profiles: ["zap"]
+    command: zap-baseline.py -t http://caddy -I
+    depends_on:
+      - caddy
+
+volumes:
+  pgdata:
