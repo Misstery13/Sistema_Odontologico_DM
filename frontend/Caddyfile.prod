@@ -1,0 +1,11 @@
+# Producción: SITE_ADDRESS es el dominio (ej. odonto.midominio.com); Caddy obtiene y renueva el certificado solo.
+import common.caddy
+
+{$SITE_ADDRESS} {
+	# RNF-04: cifrado en tránsito solo con TLS 1.3
+	tls {
+		protocols tls1.3
+	}
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	import app
+}

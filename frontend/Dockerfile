@@ -6,5 +6,5 @@ COPY . .
 RUN npm run build
 
 FROM caddy:2-alpine
-COPY Caddyfile /etc/caddy/Caddyfile
+COPY Caddyfile Caddyfile.prod common.caddy /etc/caddy/
 COPY --from=build /app/dist /srv

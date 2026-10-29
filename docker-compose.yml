@@ -57,11 +57,15 @@ services:
       - backend
       - payments
 
-  # Escaneo OWASP: docker compose --profile zap run --rm zap
+  # Escaneo OWASP (DAST); informes en docs/seguridad/:
+  #   docker compose --profile zap run --rm zap                                   (sitio)
+  #   docker compose --profile zap run --rm zap zap-api-scan.py -t http://caddy/api/schema/ -f openapi -r zap-api.html -I
   zap:
     image: ghcr.io/zaproxy/zaproxy:stable
     profiles: ["zap"]
-    command: zap-baseline.py -t http://caddy -I
+    command: zap-baseline.py -t http://caddy -r zap-baseline.html -I
+    volumes:
+      - ./docs/seguridad:/zap/wrk:rw
     depends_on:
       - caddy
 

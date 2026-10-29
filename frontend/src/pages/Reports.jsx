@@ -51,7 +51,7 @@ function CommissionRules({ onSaved }) {
     }
   };
   const ids = [...new Set([...rules.map((r) => r.dentist), ...dentists.map((d) => d.id)])];
-  const name = (id) => rules.find((r) => r.dentist === id)?.dentist_name || dentists.find((d) => d.id === id)?.name;
+  const name = (id) => dentists.find((d) => d.id === id)?.name || rules.find((r) => r.dentist === id)?.dentist_name;
 
   return (
     <Card title="Reglas de honorarios">
@@ -60,9 +60,9 @@ function CommissionRules({ onSaved }) {
           const rule = rules.find((r) => r.dentist === id);
           return (
             <li key={id} className="rule-row py-3">
-              <form onSubmit={(e) => save(e, id, rule)} className="flex flex-wrap items-end gap-3">
+              <form key={`${rule?.kind}-${rule?.value}`} onSubmit={(e) => save(e, id, rule)} className="flex flex-wrap items-end gap-3">
                 <span className="w-40 font-medium text-pen">{name(id)}</span>
-                <label className="w-64"><span className="label">Regla</span>
+                <label className="w-80"><span className="label">Regla</span>
                   <select name="kind" defaultValue={rule?.kind || "pct"} className="field">
                     {Object.entries(KINDS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
                   </select>
@@ -110,7 +110,7 @@ export default function Reports() {
         <>
           <dl className="sheet grid grid-cols-2 gap-4 px-5 py-4 md:grid-cols-4">
             {[
-              ["Producción", money(data.commissions.reduce((s, c) => s + c.production, 0))],
+              ["Producción", money(data.production)],
               ["Cobrado", money(totalIncome)],
               ["Honorarios a liquidar", money(totalCommission)],
               ["Ausentismo", data.no_show_rate === null ? "—" : `${data.no_show_rate}%`],

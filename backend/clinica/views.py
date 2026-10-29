@@ -3,7 +3,7 @@ import secrets
 from datetime import timedelta
 
 from django.contrib.auth import authenticate
-from django.db import transaction
+from django.db import connection, transaction
 from django.db.models import Count, F, Q, Sum
 from django.utils import timezone
 from rest_framework import viewsets
@@ -421,6 +421,7 @@ def reports(request):
     consumption = (StockMovement.objects.filter(clinic_id=tenant, reason="consumo", created_at__date__gte=start, created_at__date__lte=end)
                    .values("supply__name", "supply__unit").annotate(quantity=-Sum("quantity")).order_by("-quantity"))
     return Response({
+        "production": treatments.aggregate(total=Sum("cost"))["total"] or 0,
         "commissions": list(by_dentist.values()),
         "top_procedures": list(treatments.values("procedure").annotate(count=Count("id"), production=Sum("cost")).order_by("-count")[:8]),
         "appointments": by_status,
@@ -458,6 +459,18 @@ def login(request):
     return Response(
         {"token": token.key, "id": user.pk, "user": user.get_full_name() or user.username, "role": user.role, "clinic": user.clinic.name}
     )
+
+
+@api_view(["GET"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def health(request):
+    """Healthcheck para el orquestador: responde 503 si la base de datos no está disponible."""
+    try:
+        connection.ensure_connection()
+    except Exception:
+        return Response({"status": "db unavailable"}, status=503)
+    return Response({"status": "ok"})
 
 
 @api_view(["GET"])

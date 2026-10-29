@@ -3,9 +3,17 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+from django.core.exceptions import ImproperlyConfigured
+
 SECRET_KEY = os.environ.get("SECRET_KEY", "dev-insecure-key")
 DEBUG = os.environ.get("DEBUG", "1") == "1"
 ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "localhost,127.0.0.1,backend").split(",")
+
+# Producción: nunca arrancar con secretos de ejemplo ni en modo debug
+if os.environ.get("DJANGO_ENV") == "production":
+    weak = {"", "dev-insecure-key", "cambiar-en-produccion", "odonto"}
+    if DEBUG or SECRET_KEY in weak or len(SECRET_KEY) < 40 or os.environ.get("POSTGRES_PASSWORD", "odonto") in weak:
+        raise ImproperlyConfigured("En producción define SECRET_KEY (40+ caracteres), POSTGRES_PASSWORD propia y DEBUG=0")
 
 INSTALLED_APPS = [
     "django.contrib.auth",
@@ -39,6 +47,12 @@ else:
     DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": BASE_DIR / "db.sqlite3"}}
 
 AUTH_USER_MODEL = "clinica.User"
+AUTH_PASSWORD_VALIDATORS = [
+    {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
+    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator", "OPTIONS": {"min_length": 10}},
+    {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
+    {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
+]
 LANGUAGE_CODE = "es-ec"
 TIME_ZONE = "America/Guayaquil"
 USE_I18N = True

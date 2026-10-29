@@ -256,3 +256,23 @@ class FinanceTests(APITestCase):
         # pct_net 50%: corona (280 - 120 lab) * 0.5 = 80; resina (45 - 3 materiales) * 0.5 = 21
         self.assertEqual((row["treatments"], row["production"], row["commission"]), (2, 325, 101))
         self.assertEqual(rep["consumption"][0]["quantity"], 0.5)
+
+
+class OperationsTests(APITestCase):
+    """Fase 4: alta de clínicas en producción, healthcheck y errores JSON."""
+
+    def test_nueva_clinica_bootstraps_catalogs(self):
+        from .models import ConsentTemplate, Procedure, Supply
+        call_command("nueva_clinica", "Clínica Nueva", "--sillones", "3")
+        call_command("nueva_clinica", "Clínica Nueva")  # idempotente
+        clinic = Clinic.objects.get(name="Clínica Nueva")
+        self.assertEqual(Chair.objects.filter(clinic=clinic).count(), 3)
+        self.assertEqual(Procedure.objects.filter(clinic=clinic).count(), 7)
+        self.assertTrue(Supply.objects.filter(clinic=clinic, stock=0).exists())  # sin stock inventado
+        self.assertTrue(ConsentTemplate.objects.filter(clinic=clinic).exists())
+        self.assertFalse(User.objects.filter(clinic=clinic).exists())  # sin usuarios demo
+
+    def test_health_and_json_404(self):
+        self.assertEqual(self.client.get("/api/health/").json(), {"status": "ok"})
+        r = self.client.get("/api/no-existe/")
+        self.assertEqual((r.status_code, r["Content-Type"]), (404, "application/json"))

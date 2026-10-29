@@ -1,0 +1,85 @@
+# Criterios de aceptación técnica (SRS 8.2) en cada push: tests, cobertura >= 80 % y auditorías SAST/dependencias.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Tests y cobertura
+        run: |
+          coverage run --source=clinica,config --omit='*/migrations/*,*/tests.py,*/management/commands/seed.py,config/wsgi.py' manage.py test
+          coverage report --fail-under=80
+      - name: SAST (bandit, severidad media o mayor)
+        run: bandit -q -r clinica config -x clinica/tests.py,clinica/migrations -ll
+      - name: Dependencias vulnerables
+        run: pip-audit -r requirements.txt
+
+  payments:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: odonto
+          POSTGRES_USER: odonto
+          POSTGRES_PASSWORD: odonto
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U odonto" --health-interval 2s --health-retries 30
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Esquema de Django (tablas que el servicio Go lee)
+        working-directory: backend
+        env:
+          POSTGRES_HOST: localhost
+        run: pip install -r requirements.txt && python manage.py migrate --noinput
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: payments/go.sum
+      - name: Tests de integración y cobertura
+        working-directory: payments
+        env:
+          DATABASE_URL: postgres://odonto:odonto@localhost:5432/odonto
+          REDIS_URL: redis://localhost:6379/0
+        run: |
+          go vet ./...
+          go test -count=1 -coverprofile=cover.out ./...
+          go tool cover -func=cover.out | awk '/^total:/ { sub("%", "", $3); if ($3 < 80) { print "cobertura " $3 "% < 80%"; exit 1 } print "cobertura " $3 "%" }'
+      - name: Vulnerabilidades conocidas
+        working-directory: payments
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm audit --omit=dev --audit-level=moderate

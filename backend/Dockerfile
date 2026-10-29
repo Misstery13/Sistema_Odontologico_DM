@@ -7,4 +7,5 @@ COPY . .
 RUN useradd -m app
 USER app
 EXPOSE 8000
-CMD ["sh", "-c", "python manage.py migrate --noinput && python manage.py seed && gunicorn config.wsgi -b 0.0.0.0:8000 -w 3"]
+# los datos demo (usuarios con clave conocida) nunca se cargan en producción
+CMD ["sh", "-c", "python manage.py migrate --noinput && if [ \"$DJANGO_ENV\" != production ]; then python manage.py seed; fi && exec gunicorn config.wsgi -b 0.0.0.0:8000 -w ${GUNICORN_WORKERS:-3} --access-logfile -"]

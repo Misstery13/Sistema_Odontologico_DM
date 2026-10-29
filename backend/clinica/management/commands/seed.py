@@ -6,7 +6,8 @@ from clinica.models import (
     Chair, Clinic, CommissionRule, ConsentTemplate, Patient, Procedure, RecipeLine, StockMovement, Supply, Treatment, User,
 )
 
-DEMO_PASSWORD = "odonto123"
+# solo datos demo: el contenedor no ejecuta seed en producción (DJANGO_ENV=production)
+DEMO_PASSWORD = "odonto123"  # nosec B105
 
 CONSENT_BODY = """Yo, {paciente}, con cédula {cedula}, declaro que el/la Dr(a). {odontologo} me explicó en lenguaje claro el procedimiento de {procedimiento}, su propósito, alternativas y los riesgos posibles: {riesgos}.
 

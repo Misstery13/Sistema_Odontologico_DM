@@ -64,9 +64,18 @@ var issueInvoice = func(p Payment, clinic int64) string {
 
 func main() {
 	ctx := context.Background()
-	db, err := pgxpool.New(ctx, os.Getenv("DATABASE_URL"))
+	app, err := connect(ctx, os.Getenv("DATABASE_URL"), os.Getenv("REDIS_URL"))
 	if err != nil {
 		log.Fatal(err)
+	}
+	log.Fatal(app.routes().Listen(":8080"))
+}
+
+// connect abre PostgreSQL y Redis y crea las tablas propias del servicio.
+func connect(ctx context.Context, dbURL, redisURL string) (*App, error) {
+	db, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		return nil, err
 	}
 	for _, stmt := range []string{
 		`CREATE TABLE IF NOT EXISTS payments (
@@ -89,24 +98,32 @@ func main() {
 			UNIQUE (clinic_id, day))`,
 	} {
 		if _, err := db.Exec(ctx, stmt); err != nil {
-			log.Fatal(err)
+			return nil, err
 		}
 	}
-	opt, err := redis.ParseURL(os.Getenv("REDIS_URL"))
+	opt, err := redis.ParseURL(redisURL)
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
-	app := &App{db: db, rdb: redis.NewClient(opt)}
+	return &App{db: db, rdb: redis.NewClient(opt)}, nil
+}
 
+func (a *App) routes() *fiber.App {
 	f := fiber.New()
-	api := f.Group("/pay", app.auth)
-	api.Get("/patients/:id/balance", allow(readers), app.balance)
-	api.Get("/patients/:id/payments", allow(readers), app.listPayments)
-	api.Post("/payments", allow(cashiers), app.createPayment)
-	api.Post("/cash-closings", allow(cashiers), app.closeCash)
-	api.Get("/cash-closings", allow(auditors), app.listClosings)
-	api.Get("/reports/income", allow(auditors), app.income)
-	log.Fatal(f.Listen(":8080"))
+	f.Get("/pay/health", func(c *fiber.Ctx) error {
+		if err := a.db.Ping(c.Context()); err != nil {
+			return fail(c, 503, "base de datos no disponible")
+		}
+		return c.JSON(fiber.Map{"status": "ok"})
+	})
+	api := f.Group("/pay", a.auth)
+	api.Get("/patients/:id/balance", allow(readers), a.balance)
+	api.Get("/patients/:id/payments", allow(readers), a.listPayments)
+	api.Post("/payments", allow(cashiers), a.createPayment)
+	api.Post("/cash-closings", allow(cashiers), a.closeCash)
+	api.Get("/cash-closings", allow(auditors), a.listClosings)
+	api.Get("/reports/income", allow(auditors), a.income)
+	return f
 }
 
 func fail(c *fiber.Ctx, status int, msg string) error {
