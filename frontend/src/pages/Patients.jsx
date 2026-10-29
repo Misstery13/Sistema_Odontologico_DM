@@ -1,77 +1,72 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, formSubmit } from "../api.js";
-
-const FIELDS = [
-  ["cedula", "Cédula", "text", true],
-  ["first_name", "Nombres", "text", true],
-  ["last_name", "Apellidos", "text", true],
-  ["birth_date", "Fecha de nacimiento", "date"],
-  ["phone", "Teléfono", "tel"],
-  ["email", "Email", "email"],
-];
+import { api, is } from "../api.js";
+import PatientForm from "../PatientForm.jsx";
 
 export default function Patients() {
-  const [patients, setPatients] = useState([]);
+  const [patients, setPatients] = useState(null);
   const [q, setQ] = useState("");
-  const [error, setError] = useState("");
+  const [fresh, setFresh] = useState(null);
 
   const load = () => api(`/api/patients/?q=${encodeURIComponent(q)}`).then(setPatients);
   useEffect(() => {
     load();
   }, [q]);
 
-  const submit = formSubmit(async (data) => {
-    if (!data.birth_date) delete data.birth_date;
-    await api("/api/patients/", { method: "POST", body: data });
+  const create = async (data) => {
+    const p = await api("/api/patients/", { method: "POST", body: data });
+    setFresh(p.id);
     load();
-  }, setError);
+  };
 
   return (
-    <div className="grid gap-4 md:grid-cols-3">
-      <section className="card md:col-span-2">
-        <div className="mb-3 flex items-center gap-2">
-          <h2 className="text-lg font-semibold">Pacientes</h2>
-          <input className="input ml-auto max-w-xs" placeholder="Buscar por nombre o cédula" value={q} onChange={(e) => setQ(e.target.value)} />
+    <div className="grid items-start gap-6 lg:grid-cols-[1fr_420px]">
+      <section className="sheet">
+        <div className="flex flex-wrap items-end gap-4 border-b-2 border-print px-5 py-4">
+          <h1 className="text-xl font-semibold">Archivo de pacientes</h1>
+          <label className="ml-auto w-full max-w-xs">
+            <span className="label">Buscar</span>
+            <input type="search" className="field" placeholder="Nombre, apellido o cédula" value={q} onChange={(e) => setQ(e.target.value)} />
+          </label>
         </div>
-        <table className="w-full text-sm">
-          <thead className="text-left text-slate-500">
-            <tr><th className="py-1">Paciente</th><th>Cédula</th><th>Teléfono</th></tr>
+        <table className="w-full text-left">
+          <thead>
+            <tr className="border-b border-print">
+              <th className="label px-5 py-2">Paciente</th>
+              <th className="label px-3 py-2">Cédula</th>
+              <th className="label hidden px-3 py-2 sm:table-cell">Teléfono</th>
+              <th className="label hidden px-5 py-2 md:table-cell">Alertas</th>
+            </tr>
           </thead>
           <tbody>
-            {patients.map((p) => (
-              <tr key={p.id} className="border-t border-slate-100">
-                <td className="py-1.5">
-                  <Link to={`/pacientes/${p.id}`} className="text-teal-700 hover:underline">{p.last_name}, {p.first_name}</Link>
+            {patients?.map((p) => (
+              <tr key={p.id} className="rule-row hover:bg-desk/50">
+                <td className="px-5 py-2.5">
+                  <Link to={`/pacientes/${p.id}`} className={`inline-block font-medium text-pen hover:underline ${p.id === fresh ? "write-in" : ""}`}>{p.last_name}, {p.first_name}</Link>
                 </td>
-                <td>{p.cedula}</td>
-                <td>{p.phone}</td>
+                <td className="px-3 py-2.5 text-pen">{p.cedula}</td>
+                <td className="hidden px-3 py-2.5 text-pen sm:table-cell">{p.phone}</td>
+                <td className="hidden px-5 py-2.5 font-medium text-red md:table-cell">{p.alerts.join(" · ")}</td>
               </tr>
             ))}
-            {!patients.length && <tr><td colSpan="3" className="py-4 text-center text-slate-400">Sin pacientes</td></tr>}
           </tbody>
         </table>
+        {patients === null && <p className="px-5 py-6 text-pencil">Cargando archivo…</p>}
+        {patients?.length === 0 && (
+          <p className="px-5 py-8 text-pencil">
+            {q ? `Ninguna ficha coincide con “${q}”.` : "Aún no hay fichas. Registra la primera con el formulario."}
+          </p>
+        )}
       </section>
 
-      <form onSubmit={submit} className="card space-y-2">
-        <h2 className="text-lg font-semibold">Nuevo paciente</h2>
-        {FIELDS.map(([name, label, type, required]) => (
-          <div key={name}>
-            <label className="label" htmlFor={name}>{label}</label>
-            <input id={name} name={name} type={type} className="input" required={required} />
+      {is("recepcion", "odontologo") && (
+        <section className="sheet border-t-4 border-red">
+          <div className="border-b border-dashed border-pencil/50 px-5 py-3">
+            <h2 className="label-red">Nueva ficha clínica</h2>
           </div>
-        ))}
-        <div>
-          <label className="label" htmlFor="allergies">Alergias</label>
-          <input id="allergies" name="allergies" className="input" />
-        </div>
-        <div>
-          <label className="label" htmlFor="medical_history">Antecedentes médicos</label>
-          <textarea id="medical_history" name="medical_history" rows="3" className="input" />
-        </div>
-        {error && <p className="text-sm text-red-600">{error}</p>}
-        <button className="btn w-full">Guardar</button>
-      </form>
+          <PatientForm onSave={create} />
+        </section>
+      )}
     </div>
   );
 }

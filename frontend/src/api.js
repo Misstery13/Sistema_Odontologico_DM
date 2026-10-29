@@ -10,6 +10,7 @@ export async function api(path, { method = "GET", body } = {}) {
   });
   if (res.status === 401 && token) {
     localStorage.removeItem("session");
+    sessionStorage.setItem("logoutReason", "Tu sesión expiró. Ingresa de nuevo.");
     location.href = "/login";
   }
   const data = res.status === 204 ? null : await res.json().catch(() => null);
@@ -39,3 +40,7 @@ export const formSubmit = (fn, setError) => async (e) => {
     setError(err.message);
   }
 };
+
+// la autorización real vive en el backend; esto solo decide qué controles mostrar
+export const is = (...roles) => roles.includes(getSession()?.role);
+export const STAFF = ["recepcion", "odontologo", "asistente"];

@@ -12,6 +12,7 @@ INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "rest_framework",
     "rest_framework.authtoken",
+    "drf_spectacular",
     "clinica",
 ]
 
@@ -45,8 +46,19 @@ USE_TZ = True
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 REST_FRAMEWORK = {
-    "DEFAULT_AUTHENTICATION_CLASSES": ["rest_framework.authentication.TokenAuthentication"],
+    "DEFAULT_AUTHENTICATION_CLASSES": ["clinica.auth.ExpiringTokenAuthentication"],
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
     "DEFAULT_THROTTLE_RATES": {"anon": "10/min"},
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+}
+SPECTACULAR_SETTINGS = {"TITLE": "Odonto DM API", "VERSION": "1.0.0"}
+
+NOTE_LOCK_HOURS = int(os.environ.get("NOTE_LOCK_HOURS", "24"))  # RF-05
+SESSION_IDLE_MINUTES = int(os.environ.get("SESSION_IDLE_MINUTES", "15"))  # RNF-05
+
+LOGGING = {
+    "version": 1,
+    "handlers": {"console": {"class": "logging.StreamHandler"}},
+    "loggers": {"notificaciones": {"handlers": ["console"], "level": "INFO"}},
 }

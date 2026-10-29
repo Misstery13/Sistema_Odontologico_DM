@@ -2,3 +2,4 @@ Django>=5.1,<5.2
 djangorestframework>=3.15,<4
 psycopg[binary]>=3.2,<4
 gunicorn>=23,<24
+drf-spectacular>=0.28,<1

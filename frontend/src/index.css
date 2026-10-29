@@ -1,8 +1,70 @@
 @import "tailwindcss";
+@import "@fontsource/work-sans/400.css";
+@import "@fontsource/work-sans/500.css";
+@import "@fontsource/work-sans/600.css";
+@import "@fontsource/work-sans/700.css";
+@import "@fontsource/kalam/400.css";
+@import "@fontsource/kalam/700.css";
+
+/* Mundo "ficha de cartulina": lo impreso (negro/rojo, Work Sans) frente a lo escrito a bolígrafo (azul, Kalam) */
+@theme {
+  --color-desk: #e6e9f0;
+  --color-card: #ffffff;
+  --color-rule: #c9d3f0;
+  --color-print: #1a1a1a;
+  --color-red: #c8202e;
+  --color-pen: #2342a8;
+  --color-pen-dark: #1a3286;
+  --color-pencil: #646a78;
+  --font-sans: "Work Sans", system-ui, sans-serif;
+  --font-hand: "Kalam", cursive;
+}
+
+@layer base {
+  html {
+    background: var(--color-desk);
+    color: var(--color-print);
+    font-family: var(--font-sans);
+    font-variant-numeric: tabular-nums;
+    scrollbar-color: #9aa6c8 var(--color-desk);
+  }
+  ::selection { background: var(--color-rule); color: var(--color-pen); }
+  input, textarea, select { caret-color: var(--color-pen); }
+  :focus-visible { outline: 2px solid var(--color-pen); outline-offset: 2px; border-radius: 2px; }
+  a { text-underline-offset: 4px; }
+}
 
 @layer components {
-  .input { @apply w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-sm focus:border-teal-500 focus:outline-none; }
-  .btn { @apply rounded bg-teal-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-teal-700 disabled:opacity-50; }
-  .card { @apply rounded-lg border border-slate-200 bg-white p-4 shadow-sm; }
-  .label { @apply mb-1 block text-xs font-medium text-slate-500; }
+  /* cartulina sobre el escritorio */
+  .sheet {
+    background: var(--color-card);
+    box-shadow: 0 1px 2px rgb(26 26 26 / 0.08), 0 10px 28px -14px rgb(35 66 168 / 0.25);
+  }
+  /* etiqueta impresa del formulario */
+  .label { @apply text-xs font-semibold uppercase tracking-[0.12em] text-print; }
+  .label-red { @apply text-xs font-semibold uppercase tracking-[0.12em] text-red; }
+  /* lo escrito a mano */
+  .hand { font-family: var(--font-hand); color: var(--color-pen); }
+  /* campo = renglón */
+  .field {
+    @apply w-full border-0 border-b-[1.5px] border-rule bg-transparent px-0 py-1.5 text-base font-medium text-pen placeholder:font-normal placeholder:text-pencil;
+  }
+  .field:focus { @apply border-pen outline-none; }
+  select.field { @apply cursor-pointer; }
+  .btn {
+    @apply rounded-[3px] bg-pen px-4 py-2 text-sm font-semibold uppercase tracking-[0.06em] text-white transition-colors hover:bg-pen-dark disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .link { @apply text-sm font-medium text-pen underline decoration-rule decoration-2 hover:decoration-pen; }
+  .rule-row { @apply border-b border-rule; }
+  .error { @apply text-sm font-medium text-red; }
+  /* el trazo de bolígrafo: lo recién escrito se revela de izquierda a derecha */
+  .write-in { animation: write-in 450ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+}
+
+@keyframes write-in {
+  from { clip-path: inset(0 100% 0 0); }
+  to { clip-path: inset(0 0 0 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .write-in { animation: none; }
 }

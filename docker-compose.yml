@@ -26,6 +26,18 @@ services:
       db:
         condition: service_healthy
 
+  # RF-11: recordatorios 48h/24h (adaptador simulado, ver logs de este servicio)
+  reminders:
+    build: ./backend
+    command: ["sh", "-c", "sleep 30; while true; do python manage.py send_reminders; sleep 900; done"]
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-odonto}
+      SECRET_KEY: ${SECRET_KEY:-cambiar-en-produccion}
+      DEBUG: "0"
+    depends_on:
+      - backend
+
   payments:
     build: ./payments
     environment:
