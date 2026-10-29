@@ -2,7 +2,9 @@ from datetime import date
 
 from django.core.management.base import BaseCommand
 
-from clinica.models import Chair, Clinic, ConsentTemplate, Patient, Treatment, User
+from clinica.models import (
+    Chair, Clinic, CommissionRule, ConsentTemplate, Patient, Procedure, RecipeLine, StockMovement, Supply, Treatment, User,
+)
 
 DEMO_PASSWORD = "odonto123"
 
@@ -20,6 +22,32 @@ CONSENTS = {
     "Implante dental": "dolor, inflamación, infección, falta de oseointegración, lesión nerviosa y compromiso del seno maxilar",
     "Anestesia local": "reacción alérgica, hematoma, parestesia temporal y lipotimia",
 }
+
+
+# insumo: (unidad, stock inicial, mínimo, costo unitario)
+SUPPLIES = {
+    "Resina compuesta": ("g", 40, 8, 6.5),
+    "Anestesia lidocaína 2%": ("cartucho", 100, 20, 0.6),
+    "Guantes de nitrilo": ("par", 200, 50, 0.12),
+    "Ácido grabador": ("ml", 30, 5, 1.2),
+    "Adhesivo dental": ("ml", 10, 2, 9),
+    "Limas de endodoncia": ("unidad", 30, 10, 2.5),
+    "Sutura reabsorbible": ("unidad", 25, 5, 1.8),
+    "Pasta profiláctica": ("g", 200, 40, 0.05),
+    "Sellante de fosas": ("ml", 10, 2, 8),
+}
+# código: (nombre, honorario, laboratorio, receta {insumo: cantidad})
+PROCEDURES = {
+    "PROF": ("Profilaxis", 25, 0, {"Pasta profiláctica": 5, "Guantes de nitrilo": 1}),
+    "RES": ("Restauración con resina", 45, 0, {"Resina compuesta": 0.5, "Anestesia lidocaína 2%": 1, "Guantes de nitrilo": 1, "Ácido grabador": 0.2, "Adhesivo dental": 0.1}),
+    "SEL": ("Sellante de fosas y fisuras", 15, 0, {"Sellante de fosas": 0.2, "Ácido grabador": 0.1, "Guantes de nitrilo": 1}),
+    "END": ("Endodoncia unirradicular", 120, 0, {"Anestesia lidocaína 2%": 2, "Guantes de nitrilo": 2, "Limas de endodoncia": 3}),
+    "EXO": ("Exodoncia simple", 40, 0, {"Anestesia lidocaína 2%": 2, "Guantes de nitrilo": 1, "Sutura reabsorbible": 1}),
+    "COR": ("Corona de porcelana", 160, 120, {"Anestesia lidocaína 2%": 1, "Guantes de nitrilo": 2}),
+    "IMP": ("Implante dental", 550, 350, {"Anestesia lidocaína 2%": 3, "Guantes de nitrilo": 2, "Sutura reabsorbible": 2}),
+}
+# odontólogo: (tipo de regla, valor) para la liquidación de honorarios
+COMMISSIONS = {"dra.lopez": ("pct", 40), "dr.perez": ("pct_net", 50), "dr.vega": ("fixed", 20)}
 
 
 class Command(BaseCommand):
@@ -52,6 +80,23 @@ class Command(BaseCommand):
                 if created:
                     user.set_password(DEMO_PASSWORD)
                     user.save()
+
+        for clinic in Clinic.objects.all():
+            first_user = clinic.users.order_by("id").first()
+            for name, (unit, stock, minimum, cost) in SUPPLIES.items():
+                supply, created = Supply.objects.get_or_create(
+                    clinic=clinic, name=name, defaults={"unit": unit, "stock": stock, "min_stock": minimum, "unit_cost": cost}
+                )
+                if created:
+                    StockMovement.objects.create(clinic=clinic, supply=supply, quantity=stock, reason="compra", user=first_user, note="Inventario inicial")
+            for code, (name, fee, lab, recipe) in PROCEDURES.items():
+                proc, created = Procedure.objects.get_or_create(clinic=clinic, code=code, defaults={"name": name, "fee": fee, "lab_cost": lab})
+                if created:
+                    for supply, qty in recipe.items():
+                        RecipeLine.objects.create(procedure=proc, supply=Supply.objects.get(clinic=clinic, name=supply), quantity=qty)
+        for username, (kind, value) in COMMISSIONS.items():
+            dentist = User.objects.get(username=username)
+            CommissionRule.objects.get_or_create(dentist=dentist, defaults={"clinic": dentist.clinic, "kind": kind, "value": value})
 
         sonrisa = Clinic.objects.get(name="Clínica Sonrisa")
         p, created = Patient.objects.get_or_create(

@@ -105,6 +105,7 @@ func main() {
 	api.Post("/payments", allow(cashiers), app.createPayment)
 	api.Post("/cash-closings", allow(cashiers), app.closeCash)
 	api.Get("/cash-closings", allow(auditors), app.listClosings)
+	api.Get("/reports/income", allow(auditors), app.income)
 	log.Fatal(f.Listen(":8080"))
 }
 
@@ -312,6 +313,34 @@ func (a *App) listClosings(c *fiber.Ctx) error {
 		}
 		out = append(out, fiber.Map{"day": day.Format("2006-01-02"), "counted": float64(counted) / 100,
 			"expected": float64(expected) / 100, "difference": float64(counted-expected) / 100, "user": user})
+	}
+	return c.JSON(out)
+}
+
+// income resume lo cobrado en el período por método de pago (reportes de gestión).
+func (a *App) income(c *fiber.Ctx) error {
+	from, to := c.Query("from"), c.Query("to")
+	if _, err := time.Parse("2006-01-02", from); err != nil {
+		return fail(c, 400, "Indica el rango ?from=AAAA-MM-DD&to=AAAA-MM-DD")
+	}
+	if _, err := time.Parse("2006-01-02", to); err != nil {
+		return fail(c, 400, "Indica el rango ?from=AAAA-MM-DD&to=AAAA-MM-DD")
+	}
+	rows, err := a.db.Query(c.Context(), `SELECT method, COUNT(*), SUM(amount_cents) FROM payments
+		WHERE clinic_id = $1 AND (created_at AT TIME ZONE 'America/Guayaquil')::date BETWEEN $2::date AND $3::date
+		GROUP BY method ORDER BY SUM(amount_cents) DESC`, sess(c).clinic, from, to)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	out := []fiber.Map{}
+	for rows.Next() {
+		var method string
+		var count, cents int64
+		if err := rows.Scan(&method, &count, &cents); err != nil {
+			return err
+		}
+		out = append(out, fiber.Map{"method": method, "count": count, "amount": float64(cents) / 100})
 	}
 	return c.JSON(out)
 }

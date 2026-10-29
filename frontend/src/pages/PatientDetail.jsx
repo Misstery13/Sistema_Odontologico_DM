@@ -4,6 +4,7 @@ import { api, formSubmit, getSession, is, money } from "../api.js";
 import PatientForm from "../PatientForm.jsx";
 
 import Odontogram, { pendingFindings } from "../Odontogram.jsx";
+import Budgets from "../clinical/Budgets.jsx";
 import Consents from "../clinical/Consents.jsx";
 import Perio from "../clinical/Perio.jsx";
 import Prescriptions from "../clinical/Prescriptions.jsx";
@@ -65,7 +66,7 @@ export default function PatientDetail() {
         <Payments patientId={id} rev={rev} />
       </article>
       <Odontogram patientId={id} teeth={teeth} setTeeth={setTeeth} />
-      {is("odontologo", "asistente") && <ClinicalRecord patient={patient} teeth={teeth} />}
+      {is("odontologo", "asistente", "recepcion") && <ClinicalRecord patient={patient} teeth={teeth} />}
     </div>
   );
 }
@@ -144,29 +145,53 @@ function PatientData({ patient, onEdit }) {
 
 function Treatments({ patientId, teeth, onChange }) {
   const [items, setItems] = useState([]);
+  const [catalog, setCatalog] = useState([]);
+  const [planned, setPlanned] = useState([]); // ítems aprobados del presupuesto, aún no realizados
+  const [source, setSource] = useState("");
   const [fresh, setFresh] = useState(null);
   const [error, setError] = useState("");
-  const load = () => api(`/api/treatments/?patient=${patientId}`).then(setItems);
+  const load = () => {
+    api(`/api/treatments/?patient=${patientId}`).then(setItems);
+    if (is("odontologo")) api(`/api/budgets/pending/?patient=${patientId}`).then(setPlanned);
+  };
   useEffect(() => {
     load();
+    if (is("odontologo")) api("/api/procedures/").then((l) => setCatalog(l.filter((p) => p.active)));
   }, [patientId]);
 
+  // origen: "b<id>" ítem del presupuesto, "c<id>" catálogo, "otro" texto libre
   const submit = formSubmit(async (data) => {
-    const t = await api("/api/treatments/", { method: "POST", body: { ...data, patient: patientId, tooth: data.tooth || null } });
+    const body = { patient: patientId, date: data.date, notes: data.notes, tooth: data.tooth || null };
+    if (source.startsWith("b")) body.budget_item = Number(source.slice(1));
+    else if (source.startsWith("c")) body.catalog = Number(source.slice(1));
+    else Object.assign(body, { procedure: data.procedure, cost: data.cost });
+    const t = await api("/api/treatments/", { method: "POST", body });
     setFresh(t.id);
+    setSource("");
     load();
     onChange();
   }, setError);
 
   const pending = pendingFindings(teeth);
+  const selectedPlan = planned.find((i) => `b${i.id}` === source);
+  const selectedProc = catalog.find((p) => `c${p.id}` === source);
+  const price = selectedPlan ? selectedPlan.net : selectedProc ? Number(selectedProc.fee) + Number(selectedProc.lab_cost) : null;
 
   return (
     <Panel title="Tratamientos">
       <h3 className="label border-b-2 border-print pb-1">Por tratar</h3>
-      {pending.length ? (
-        <ul>{pending.map((f) => <li key={f} className="rule-row py-1.5 font-medium text-red">{f}</li>)}</ul>
+      {pending.length || planned.length ? (
+        <ul>
+          {pending.map((f) => <li key={f} className="rule-row py-1.5 font-medium text-red">{f}</li>)}
+          {planned.map((i) => (
+            <li key={i.id} className="rule-row flex justify-between py-1.5 text-pen">
+              <span>{i.procedure_name}{i.tooth && ` · pieza ${i.tooth}`} <span className="text-pencil">· fase {i.phase}{i.scheduled ? " · agendado" : ""}</span></span>
+              <span>{money(i.net)}</span>
+            </li>
+          ))}
+        </ul>
       ) : (
-        <p className="py-2 text-sm text-pencil">Sin hallazgos pendientes en el odontograma.</p>
+        <p className="py-2 text-sm text-pencil">Sin hallazgos ni presupuestos pendientes.</p>
       )}
       <h3 className="label mt-6 flex justify-between border-b-2 border-print pb-1">
         <span>Realizado</span>
@@ -179,17 +204,36 @@ function Treatments({ patientId, teeth, onChange }) {
               <span className="text-pen"><span className="text-pencil">{fmtDate(t.date)}</span> · {t.procedure}{t.tooth && ` · pieza ${t.tooth}`}</span>
               <span className="font-medium text-pen">{money(t.cost)}</span>
             </div>
-            {t.notes && <p className="hand text-base">{t.notes}</p>}
+            {(t.dentist_name || t.notes) && (
+              <p className="text-sm text-pencil">{t.dentist_name}{t.notes && <span className="hand text-base text-pen"> · {t.notes}</span>}</p>
+            )}
           </li>
         ))}
         {!items.length && <li className="py-2 text-sm text-pencil">Sin tratamientos registrados.</li>}
       </ul>
       {is("odontologo") && <form onSubmit={submit} className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
-        <label className="col-span-2"><span className="label">Procedimiento</span><input name="procedure" className="field" required /></label>
-        <label><span className="label">Pieza</span><input name="tooth" type="number" min="11" max="85" className="field" placeholder="Opcional" /></label>
-        <label><span className="label">Costo $</span><input name="cost" type="number" step="0.01" min="0" className="field" required /></label>
-        <label className="col-span-2"><span className="label">Fecha</span><input name="date" type="date" className="field" required defaultValue={new Date().toLocaleDateString("sv")} /></label>
+        <label className="col-span-full"><span className="label">Procedimiento realizado</span>
+          <select className="field" value={source} onChange={(e) => setSource(e.target.value)} required>
+            <option value="" disabled>Elegir…</option>
+            {planned.length > 0 && (
+              <optgroup label="Del presupuesto aprobado">
+                {planned.map((i) => <option key={i.id} value={`b${i.id}`}>{i.procedure_name}{i.tooth ? ` · pieza ${i.tooth}` : ""} · {money(i.net)}</option>)}
+              </optgroup>
+            )}
+            <optgroup label="Catálogo">
+              {catalog.map((p) => <option key={p.id} value={`c${p.id}`}>{p.name} · {money(Number(p.fee) + Number(p.lab_cost))}</option>)}
+            </optgroup>
+            <option value="otro">Otro (texto libre)</option>
+          </select>
+        </label>
+        {source === "otro" && <>
+          <label className="col-span-2"><span className="label">Descripción</span><input name="procedure" className="field" required /></label>
+          <label className="col-span-2"><span className="label">Costo $</span><input name="cost" type="number" step="0.01" min="0" className="field" required /></label>
+        </>}
+        <label><span className="label">Pieza</span><input name="tooth" type="number" min="11" max="85" className="field" placeholder={selectedPlan?.tooth ? String(selectedPlan.tooth) : "Opcional"} /></label>
+        <label><span className="label">Fecha</span><input name="date" type="date" className="field" required defaultValue={new Date().toLocaleDateString("sv")} /></label>
         <label className="col-span-2"><span className="label">Notas</span><input name="notes" className="field" /></label>
+        {price !== null && <p className="col-span-full text-sm text-pencil">Se cargará {money(price)} al saldo y se descargarán los insumos de la receta estándar.</p>}
         {error && <p className="error col-span-full" role="alert">{error}</p>}
         <button className="btn col-span-full sm:col-span-2 sm:col-start-3">Registrar tratamiento</button>
       </form>}
@@ -367,14 +411,21 @@ function Notes({ patientId }) {
 }
 
 // expediente clínico (solo personal clínico): evolución, periodontograma, recetas y consentimientos
-const TABS = { soep: "Evolución SOEP", perio: "Periodontograma", recetas: "Recetas", consentimientos: "Consentimientos" };
+const TABS = {
+  soep: ["Evolución SOEP", ["odontologo", "asistente"]],
+  perio: ["Periodontograma", ["odontologo", "asistente"]],
+  presupuestos: ["Presupuestos", ["odontologo", "asistente", "recepcion"]],
+  recetas: ["Recetas", ["odontologo", "asistente"]],
+  consentimientos: ["Consentimientos", ["odontologo", "asistente"]],
+};
 
 function ClinicalRecord({ patient, teeth }) {
-  const [tab, setTab] = useState("soep");
+  const tabs = Object.entries(TABS).filter(([, [, roles]]) => is(...roles));
+  const [tab, setTab] = useState(tabs[0][0]);
   return (
     <section>
       <div role="tablist" className="flex flex-wrap gap-1">
-        {Object.entries(TABS).map(([k, v]) => (
+        {tabs.map(([k, [v]]) => (
           <button key={k} role="tab" aria-selected={tab === k} onClick={() => setTab(k)}
             className={`rounded-t-[3px] px-4 py-2 text-sm font-semibold ${tab === k ? "bg-card text-pen" : "text-print hover:text-pen"}`}>
             {v}
@@ -384,6 +435,7 @@ function ClinicalRecord({ patient, teeth }) {
       <div role="tabpanel">
         {tab === "soep" && <Notes patientId={patient.id} />}
         {tab === "perio" && <Perio patient={patient} teeth={teeth} />}
+        {tab === "presupuestos" && <Budgets patient={patient} />}
         {tab === "recetas" && <Prescriptions patient={patient} />}
         {tab === "consentimientos" && <Consents patient={patient} />}
       </div>

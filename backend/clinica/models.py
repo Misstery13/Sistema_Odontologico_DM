@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 from datetime import date, timedelta
+from decimal import Decimal
 
 from django.conf import settings
 from django.contrib.auth.models import AbstractUser
@@ -132,6 +133,7 @@ class Appointment(models.Model):
     minutes = models.PositiveSmallIntegerField(default=30, validators=[MinValueValidator(5), MaxValueValidator(480)])
     reason = models.CharField(max_length=200, blank=True)
     status = models.CharField(max_length=12, choices=STATUS, default="programado")
+    budget_item = models.ForeignKey("BudgetItem", null=True, blank=True, on_delete=models.SET_NULL, related_name="appointments")
 
     class Meta:
         ordering = ["start"]
@@ -172,6 +174,11 @@ class Treatment(models.Model):
     cost = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(0)])
     date = models.DateField()
     notes = models.TextField(blank=True)
+    catalog = models.ForeignKey("Procedure", null=True, blank=True, on_delete=models.PROTECT)
+    dentist = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="treatments_done")
+    lab_cost = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    material_cost = models.DecimalField(max_digits=10, decimal_places=2, default=0)  # según receta de consumo
+    budget_item = models.OneToOneField("BudgetItem", null=True, blank=True, on_delete=models.PROTECT, related_name="treatment")
 
     class Meta:
         ordering = ["-date", "-id"]
@@ -348,3 +355,125 @@ class Consent(models.Model):
 
     def delete(self, *args, **kwargs):
         raise PermissionDenied("Los consentimientos no se borran")
+
+
+class Procedure(models.Model):
+    """Catálogo de procedimientos con precio y receta estándar de consumo de insumos."""
+
+    clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE)
+    code = models.CharField(max_length=20)
+    name = models.CharField(max_length=120)
+    fee = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(0)])
+    lab_cost = models.DecimalField(max_digits=10, decimal_places=2, default=0, validators=[MinValueValidator(0)])
+    active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["name"]
+        constraints = [models.UniqueConstraint(fields=["clinic", "code"], name="unique_procedure_code")]
+
+    def __str__(self):
+        return self.name
+
+
+class Supply(models.Model):
+    """Insumo clínico con stock (RF-14)."""
+
+    clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE)
+    name = models.CharField(max_length=120)
+    unit = models.CharField(max_length=20)
+    stock = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    min_stock = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    unit_cost = models.DecimalField(max_digits=10, decimal_places=4, default=0, validators=[MinValueValidator(0)])
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
+class RecipeLine(models.Model):
+    """Receta estándar de consumo: cuánto de cada insumo gasta un procedimiento."""
+
+    procedure = models.ForeignKey(Procedure, on_delete=models.CASCADE, related_name="recipe")
+    supply = models.ForeignKey(Supply, on_delete=models.PROTECT)
+    quantity = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(0)])
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["procedure", "supply"], name="unique_recipe_line")]
+
+
+class StockMovement(models.Model):
+    """Kardex inmutable: entradas (compra, ajuste) y salidas (consumo por procedimiento)."""
+
+    REASONS = [("compra", "Compra"), ("consumo", "Consumo"), ("ajuste", "Ajuste")]
+
+    clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE)
+    supply = models.ForeignKey(Supply, on_delete=models.PROTECT, related_name="movements")
+    quantity = models.DecimalField(max_digits=12, decimal_places=2)  # + entra, - sale
+    reason = models.CharField(max_length=10, choices=REASONS)
+    treatment = models.ForeignKey(Treatment, null=True, blank=True, on_delete=models.PROTECT)
+    user = models.ForeignKey(User, on_delete=models.PROTECT)
+    note = models.CharField(max_length=200, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def delete(self, *args, **kwargs):
+        raise PermissionDenied("El kardex es inmutable; registra un ajuste")
+
+
+class Budget(models.Model):
+    """Presupuesto multinivel (RF-07): ítems agrupados por fase/sesión, descuento autorizado."""
+
+    STATUS = [("pendiente", "Pendiente"), ("aprobado", "Aprobado"), ("parcial", "Aprobado parcialmente"), ("rechazado", "Rechazado")]
+
+    clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE)
+    patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="budgets")
+    author = models.ForeignKey(User, on_delete=models.PROTECT)
+    created_at = models.DateTimeField(default=timezone.now)
+    discount_pct = models.DecimalField(max_digits=5, decimal_places=2, default=0, validators=[MinValueValidator(0), MaxValueValidator(100)])
+    notes = models.TextField(blank=True)
+    status = models.CharField(max_length=10, choices=STATUS, default="pendiente")
+    decided_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+
+class BudgetItem(models.Model):
+    TENANT_FIELD = "budget__clinic_id"
+
+    budget = models.ForeignKey(Budget, on_delete=models.CASCADE, related_name="items")
+    phase = models.PositiveSmallIntegerField(default=1)
+    procedure = models.ForeignKey(Procedure, on_delete=models.PROTECT)
+    tooth = models.PositiveSmallIntegerField(choices=ALL_TEETH, null=True, blank=True)
+    fee = models.DecimalField(max_digits=10, decimal_places=2)
+    lab_cost = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    approved = models.BooleanField(null=True)  # None = sin decidir
+
+    class Meta:
+        ordering = ["phase", "id"]
+
+    @property
+    def net(self):
+        """Precio al paciente: honorario + laboratorio, menos el descuento del presupuesto."""
+        return ((self.fee + self.lab_cost) * (1 - self.budget.discount_pct / 100)).quantize(Decimal("0.01"))
+
+
+class CommissionRule(models.Model):
+    """Regla de liquidación de honorarios por odontólogo (RF-13)."""
+
+    KINDS = [("pct", "% del precio"), ("fixed", "Monto fijo por procedimiento"), ("pct_net", "% tras costos de laboratorio y materiales")]
+
+    clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE)
+    dentist = models.OneToOneField(User, on_delete=models.CASCADE, related_name="commission_rule")
+    kind = models.CharField(max_length=8, choices=KINDS)
+    value = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(0)])
+
+    def amount(self, treatment):
+        if self.kind == "fixed":
+            return self.value
+        base = treatment.cost - (treatment.lab_cost + treatment.material_cost if self.kind == "pct_net" else 0)
+        return (max(base, Decimal(0)) * self.value / 100).quantize(Decimal("0.01"))

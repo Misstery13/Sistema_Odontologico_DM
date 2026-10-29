@@ -18,12 +18,18 @@ PERMISSIONS = {
     "notes": ({"odontologo", "asistente"}, {"odontologo", "asistente"}),
     "appointments": (STAFF, STAFF),
     "chairs": (STAFF | {"admin"}, {"admin"}),
-    "dentists": (STAFF, set()),
+    "dentists": (STAFF | {"auditor", "admin"}, set()),
     "audit": ({"admin", "auditor"}, set()),
     "perio": ({"odontologo", "asistente"}, {"odontologo"}),
     "prescriptions": ({"odontologo", "asistente"}, {"odontologo"}),
     "consents": ({"odontologo", "asistente"}, {"odontologo", "asistente"}),
     "consent_templates": ({"odontologo", "asistente", "admin"}, {"admin"}),
+    "catalog": (STAFF | {"auditor", "admin"}, {"admin"}),
+    "supplies": ({"asistente", "odontologo", "auditor", "admin"}, {"asistente", "admin"}),
+    "budgets": (STAFF, {"odontologo"}),
+    "budget_decision": (set(), {"recepcion", "odontologo"}),  # registra la aprobación del paciente
+    "commissions": ({"auditor", "admin"}, {"auditor", "admin"}),
+    "reports": ({"auditor", "admin"}, set()),
 }
 
 

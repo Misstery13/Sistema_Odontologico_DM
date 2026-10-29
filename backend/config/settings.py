@@ -56,6 +56,7 @@ SPECTACULAR_SETTINGS = {"TITLE": "Odonto DM API", "VERSION": "1.0.0"}
 
 NOTE_LOCK_HOURS = int(os.environ.get("NOTE_LOCK_HOURS", "24"))  # RF-05
 SESSION_IDLE_MINUTES = int(os.environ.get("SESSION_IDLE_MINUTES", "15"))  # RNF-05
+MAX_DISCOUNT_PCT = int(os.environ.get("MAX_DISCOUNT_PCT", "15"))  # RF-07: descuento autorizado
 
 LOGGING = {
     "version": 1,

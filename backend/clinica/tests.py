@@ -177,3 +177,82 @@ class ClinicaTests(APITestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["method"], "otp")
         self.assertNotIn("otp_hash", r.json())
+
+
+class FinanceTests(APITestCase):
+    """Fase 3: catálogo, descargo de insumos (RF-14), presupuestos (RF-07/08), honorarios (RF-13)."""
+
+    def setUp(self):
+        from decimal import Decimal
+        from .models import CommissionRule, Procedure, RecipeLine, Supply
+        self.D = Decimal
+        clinic = Clinic.objects.create(name="A")
+        self.dentist = User.objects.create_user("d", password="x", clinic=clinic, role="odontologo", first_name="Ana")
+        self.recep = User.objects.create_user("r", password="x", clinic=clinic, role="recepcion")
+        self.auditor = User.objects.create_user("au", password="x", clinic=clinic, role="auditor")
+        self.chair = Chair.objects.create(clinic=clinic, name="S1")
+        self.patient = Patient.objects.create(clinic=clinic, cedula="1", first_name="P", last_name="A")
+        self.resin = Supply.objects.create(clinic=clinic, name="Resina", unit="g", stock=10, min_stock=2, unit_cost=6)
+        self.res = Procedure.objects.create(clinic=clinic, code="RES", name="Resina", fee=45)
+        self.cor = Procedure.objects.create(clinic=clinic, code="COR", name="Corona", fee=160, lab_cost=120)
+        RecipeLine.objects.create(procedure=self.res, supply=self.resin, quantity=self.D("0.5"))
+        CommissionRule.objects.create(clinic=clinic, dentist=self.dentist, kind="pct_net", value=50)
+
+    def auth(self, user):
+        self.client.credentials(HTTP_AUTHORIZATION="Token " + Token.objects.get_or_create(user=user)[0].key)
+
+    def test_treatment_from_catalog_consumes_supplies(self):
+        self.auth(self.dentist)
+        r = self.client.post("/api/treatments/", {"patient": self.patient.id, "catalog": self.res.id, "date": "2026-10-01"})
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual((r.json()["procedure"], r.json()["cost"], r.json()["material_cost"]), ("Resina", "45.00", "3.00"))
+        self.resin.refresh_from_db()
+        self.assertEqual(self.resin.stock, self.D("9.5"))
+        self.assertEqual(self.resin.movements.get(reason="consumo").quantity, self.D("-0.5"))
+
+    def test_stock_movements(self):
+        self.auth(User.objects.create_user("as", password="x", clinic=self.patient.clinic, role="asistente"))
+        post = lambda **d: self.client.post("/api/stock-movements/", {"supply": self.resin.id, **d})
+        self.assertEqual(post(quantity=5, reason="compra").status_code, 201)
+        self.assertEqual(post(quantity=-1, reason="consumo").status_code, 400)
+        self.assertEqual(post(quantity=-1, reason="ajuste").status_code, 400)  # requiere nota
+        self.assertEqual(post(quantity=-1, reason="ajuste", note="Vencido").status_code, 201)
+        self.resin.refresh_from_db()
+        self.assertEqual(self.resin.stock, 14)
+
+    def test_budget_flow(self):
+        self.auth(self.dentist)
+        items = [{"phase": 1, "procedure": self.res.id, "tooth": 24}, {"phase": 2, "procedure": self.cor.id, "tooth": 46}]
+        self.assertEqual(self.client.post("/api/budgets/", {"patient": self.patient.id, "discount_pct": 30, "items": items}, format="json").status_code, 400)
+        b = self.client.post("/api/budgets/", {"patient": self.patient.id, "discount_pct": 10, "items": items}, format="json").json()
+        self.assertEqual(b["totals"]["total"], 292.5)  # (45 + 160 + 120) * 0.9
+        res_item = [i for i in b["items"] if i["tooth"] == 24][0]
+        self.auth(self.recep)
+        self.assertEqual(self.client.post("/api/budgets/", {"patient": self.patient.id, "items": items}, format="json").status_code, 403)
+        d = self.client.post(f"/api/budgets/{b['id']}/decide/", {"approved_items": [res_item["id"]]}, format="json").json()
+        self.assertEqual(d["status"], "parcial")
+        self.assertEqual(self.client.post(f"/api/budgets/{b['id']}/decide/", {"approved_items": []}, format="json").status_code, 400)
+        pending = self.client.get(f"/api/budgets/pending/?patient={self.patient.id}").json()
+        self.assertEqual([i["id"] for i in pending], [res_item["id"]])
+        a = self.client.post("/api/appointments/", {"patient": self.patient.id, "dentist": self.dentist.id, "chair": self.chair.id,
+                                                    "start": "2026-11-03T10:00", "budget_item": res_item["id"]}, format="json")
+        self.assertEqual(a.status_code, 201)
+        self.assertEqual(a.json()["reason"], "Resina · pieza 24")
+        self.auth(self.dentist)
+        t = self.client.post("/api/treatments/", {"patient": self.patient.id, "budget_item": res_item["id"], "date": "2026-11-03"}, format="json")
+        self.assertEqual((t.status_code, t.json()["cost"], t.json()["tooth"]), (201, "40.50", 24))
+        again = self.client.post("/api/treatments/", {"patient": self.patient.id, "budget_item": res_item["id"], "date": "2026-11-03"}, format="json")
+        self.assertEqual(again.status_code, 400)
+
+    def test_commission_report(self):
+        self.auth(self.dentist)
+        self.client.post("/api/treatments/", {"patient": self.patient.id, "catalog": self.cor.id, "date": "2026-10-05"})
+        self.client.post("/api/treatments/", {"patient": self.patient.id, "catalog": self.res.id, "date": "2026-10-06"})
+        self.auth(self.recep)
+        self.assertEqual(self.client.get("/api/reports/?from=2026-10-01&to=2026-10-31").status_code, 403)
+        self.auth(self.auditor)
+        rep = self.client.get("/api/reports/?from=2026-10-01&to=2026-10-31").json()
+        row = rep["commissions"][0]
+        # pct_net 50%: corona (280 - 120 lab) * 0.5 = 80; resina (45 - 3 materiales) * 0.5 = 21
+        self.assertEqual((row["treatments"], row["production"], row["commission"]), (2, 325, 101))
+        self.assertEqual(rep["consumption"][0]["quantity"], 0.5)

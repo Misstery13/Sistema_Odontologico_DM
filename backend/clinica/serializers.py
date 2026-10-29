@@ -1,11 +1,13 @@
 from datetime import timedelta
 
+from django.conf import settings
 from django.db.models import Q
 from rest_framework import serializers
 
 from .models import (
     FDI_TEETH, SURFACE_STATES, SURFACES, Appointment, AuditLog, Chair, ClinicalNote, Consent, ConsentTemplate,
-    Patient, PerioExam, Prescription, Tooth, Treatment,
+    Patient, PerioExam, Prescription, Tooth, Treatment, Budget, BudgetItem, CommissionRule, Procedure, RecipeLine,
+    StockMovement, Supply,
 )
 
 
@@ -17,7 +19,8 @@ class TenantSerializer(serializers.ModelSerializer):
         tenant = self.context["request"].tenant
         for field in self.fields.values():
             if isinstance(field, serializers.PrimaryKeyRelatedField) and not field.read_only:
-                field.queryset = field.queryset.filter(clinic_id=tenant)
+                model = field.queryset.model
+                field.queryset = field.queryset.filter(**{getattr(model, "TENANT_FIELD", "clinic_id"): tenant})
 
 
 class PatientSerializer(TenantSerializer):
@@ -53,6 +56,7 @@ class ChairSerializer(TenantSerializer):
 
 
 class AppointmentSerializer(TenantSerializer):
+    budget_item = serializers.PrimaryKeyRelatedField(queryset=BudgetItem.objects.all(), required=False, allow_null=True)
     patient_name = serializers.StringRelatedField(source="patient", read_only=True)
     chair_name = serializers.StringRelatedField(source="chair", read_only=True)
     dentist_name = serializers.SerializerMethodField()
@@ -73,6 +77,12 @@ class AppointmentSerializer(TenantSerializer):
     def validate(self, data):
         inst = self.instance
         get = lambda k, default=None: data.get(k, getattr(inst, k) if inst else default)
+        item = data.get("budget_item")
+        if item:  # RF-08: un ítem aprobado del presupuesto se vuelve cita
+            if item.approved is not True or item.budget.patient_id != get("patient").pk:
+                raise serializers.ValidationError({"budget_item": "El ítem no está aprobado para este paciente"})
+            if not data.get("reason"):
+                data["reason"] = f"{item.procedure.name}{f' · pieza {item.tooth}' if item.tooth else ''}"
         if get("status", "programado") in Appointment.INACTIVE:
             return data
         start, minutes, dentist, chair = get("start"), get("minutes", 30), get("dentist"), get("chair")
@@ -104,9 +114,32 @@ class ToothSerializer(serializers.ModelSerializer):
 
 
 class TreatmentSerializer(TenantSerializer):
+    dentist_name = serializers.StringRelatedField(source="dentist", read_only=True)
+
     class Meta:
         model = Treatment
         exclude = ["clinic"]
+        read_only_fields = ["dentist", "lab_cost", "material_cost"]
+        extra_kwargs = {"procedure": {"required": False}, "cost": {"required": False}}
+
+    def validate(self, data):
+        """Origen del procedimiento: un ítem aprobado del presupuesto, el catálogo o texto libre con costo."""
+        item, catalog = data.get("budget_item"), data.get("catalog")
+        if item:
+            if item.budget.patient_id != data["patient"].pk or item.approved is not True:
+                raise serializers.ValidationError({"budget_item": "El ítem no está aprobado para este paciente"})
+            if hasattr(item, "treatment"):
+                raise serializers.ValidationError({"budget_item": "Este ítem del presupuesto ya fue realizado"})
+            catalog = data["catalog"] = item.procedure
+            data["tooth"] = data.get("tooth") or item.tooth
+            data["cost"], data["lab_cost"] = item.net, item.lab_cost
+        if catalog:
+            data.setdefault("procedure", catalog.name)
+            data.setdefault("cost", catalog.fee + catalog.lab_cost)
+            data.setdefault("lab_cost", catalog.lab_cost)
+        if not data.get("procedure") or data.get("cost") is None:
+            raise serializers.ValidationError("Elige un procedimiento del catálogo o escribe el procedimiento y su costo")
+        return data
 
 
 class ClinicalNoteSerializer(TenantSerializer):
@@ -251,3 +284,140 @@ class ConsentSerializer(TenantSerializer):
 
     def get_signed(self, obj):
         return obj.signed_at is not None
+
+
+class RecipeLineSerializer(serializers.ModelSerializer):
+    supply_name = serializers.StringRelatedField(source="supply", read_only=True)
+    unit = serializers.CharField(source="supply.unit", read_only=True)
+
+    class Meta:
+        model = RecipeLine
+        fields = ["supply", "supply_name", "unit", "quantity"]
+
+
+class ProcedureSerializer(TenantSerializer):
+    recipe = RecipeLineSerializer(many=True, required=False)
+
+    class Meta:
+        model = Procedure
+        exclude = ["clinic"]
+
+    def validate_recipe(self, lines):
+        tenant = self.context["request"].tenant
+        if any(l["supply"].clinic_id != tenant for l in lines):
+            raise serializers.ValidationError("Insumo inválido")
+        return lines
+
+    def save_recipe(self, procedure, lines):
+        if lines is not None:
+            procedure.recipe.all().delete()
+            RecipeLine.objects.bulk_create(RecipeLine(procedure=procedure, **l) for l in lines)
+
+    def create(self, data):
+        lines = data.pop("recipe", [])
+        procedure = super().create(data)
+        self.save_recipe(procedure, lines)
+        return procedure
+
+    def update(self, instance, data):
+        lines = data.pop("recipe", None)
+        procedure = super().update(instance, data)
+        self.save_recipe(procedure, lines)
+        return procedure
+
+
+class SupplySerializer(TenantSerializer):
+    low = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Supply
+        exclude = ["clinic"]
+        read_only_fields = ["stock"]  # el stock solo cambia por movimientos del kardex
+
+    def get_low(self, obj):
+        return obj.stock <= obj.min_stock
+
+
+class StockMovementSerializer(TenantSerializer):
+    supply_name = serializers.StringRelatedField(source="supply", read_only=True)
+    user_name = serializers.StringRelatedField(source="user", read_only=True)
+
+    class Meta:
+        model = StockMovement
+        exclude = ["clinic"]
+        read_only_fields = ["user", "created_at", "treatment"]
+
+    def validate(self, data):
+        if data["reason"] == "consumo":
+            raise serializers.ValidationError({"reason": "El consumo se descarga solo al registrar procedimientos"})
+        if data["quantity"] == 0 or (data["reason"] == "compra" and data["quantity"] < 0):
+            raise serializers.ValidationError({"quantity": "Una compra debe ser positiva; un ajuste, distinto de cero"})
+        if data["reason"] == "ajuste" and not data.get("note", "").strip():
+            raise serializers.ValidationError({"note": "Explica el motivo del ajuste"})
+        return data
+
+
+class BudgetItemSerializer(serializers.ModelSerializer):
+    procedure_name = serializers.StringRelatedField(source="procedure", read_only=True)
+    net = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    done = serializers.SerializerMethodField()
+    scheduled = serializers.SerializerMethodField()
+
+    class Meta:
+        model = BudgetItem
+        fields = ["id", "phase", "procedure", "procedure_name", "tooth", "fee", "lab_cost", "net", "approved", "done", "scheduled"]
+        read_only_fields = ["fee", "lab_cost", "approved"]
+
+    def get_done(self, obj):
+        return hasattr(obj, "treatment")
+
+    def get_scheduled(self, obj):
+        return obj.appointments.exclude(status__in=Appointment.INACTIVE).exists()
+
+
+class BudgetSerializer(AuthoredSerializer):
+    items = BudgetItemSerializer(many=True)
+    totals = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Budget
+        exclude = ["clinic"]
+        read_only_fields = ["author", "created_at", "status", "decided_at"]
+
+    def get_totals(self, obj):
+        items = list(obj.items.all())
+        fees = sum((i.fee for i in items), 0)
+        lab = sum((i.lab_cost for i in items), 0)
+        total = sum((i.net for i in items), 0)
+        return {"fees": fees, "lab": lab, "discount": fees + lab - total, "total": total,
+                "approved": sum((i.net for i in items if i.approved), 0)}
+
+    def validate_discount_pct(self, value):
+        # RF-07: descuento autorizado; por encima del tope se requiere un presupuesto aprobado por administración
+        if value > settings.MAX_DISCOUNT_PCT:
+            raise serializers.ValidationError(f"El descuento máximo autorizado es {settings.MAX_DISCOUNT_PCT}%")
+        return value
+
+    def validate_items(self, items):
+        tenant = self.context["request"].tenant
+        if not items:
+            raise serializers.ValidationError("Agrega al menos un procedimiento")
+        if any(i["procedure"].clinic_id != tenant or not i["procedure"].active for i in items):
+            raise serializers.ValidationError("Procedimiento inválido")
+        return items
+
+    def create(self, data):
+        items = data.pop("items")
+        budget = Budget.objects.create(**data)
+        BudgetItem.objects.bulk_create(
+            BudgetItem(budget=budget, fee=i["procedure"].fee, lab_cost=i["procedure"].lab_cost, **i) for i in items
+        )
+        return budget
+
+
+class CommissionRuleSerializer(TenantSerializer):
+    dentist_name = serializers.StringRelatedField(source="dentist", read_only=True)
+
+    class Meta:
+        model = CommissionRule
+        exclude = ["clinic"]

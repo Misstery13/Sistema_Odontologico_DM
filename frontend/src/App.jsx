@@ -7,6 +7,8 @@ import PatientDetail from "./pages/PatientDetail.jsx";
 import Appointments from "./pages/Appointments.jsx";
 import Cash from "./pages/Cash.jsx";
 import Audit from "./pages/Audit.jsx";
+import Inventory from "./pages/Inventory.jsx";
+import Reports from "./pages/Reports.jsx";
 
 const IDLE_MS = 15 * 60 * 1000; // RNF-05: el backend también invalida el token
 const AuthContext = createContext(null);
@@ -23,7 +25,7 @@ export default function App() {
     if (reason) sessionStorage.setItem("logoutReason", reason);
     setSession(null);
   };
-  const home = is(...STAFF) ? "/pacientes" : "/auditoria";
+  const home = is(...STAFF) ? "/pacientes" : "/reportes";
 
   return (
     <AuthContext.Provider value={{ session, login, logout }}>
@@ -37,6 +39,8 @@ export default function App() {
             <Route path="citas" element={<Appointments />} />
             <Route path="caja" element={<Cash />} />
             <Route path="auditoria" element={<Audit />} />
+            <Route path="inventario" element={<Inventory />} />
+            <Route path="reportes" element={<Reports />} />
           </Route>
         </Routes>
       </BrowserRouter>
@@ -70,13 +74,15 @@ function Layout() {
     `py-1 text-[15px] font-medium underline-offset-[10px] ${isActive ? "text-pen underline decoration-2" : "text-print hover:text-pen"}`;
   return (
     <div className="min-h-screen">
-      <header className="border-b-4 border-red bg-card">
+      <header className="border-b-4 border-red bg-card print:hidden">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-x-8 gap-y-2 px-4 py-3 sm:px-6">
           <Brand />
           <nav className="flex flex-wrap gap-x-6 gap-y-1">
             {is(...STAFF) && <NavLink to="/citas" className={link}>Agenda</NavLink>}
             {is(...STAFF) && <NavLink to="/pacientes" className={link}>Pacientes</NavLink>}
             {is("recepcion", "auditor", "admin") && <NavLink to="/caja" className={link}>Caja</NavLink>}
+            {is("asistente", "odontologo", "auditor", "admin") && <NavLink to="/inventario" className={link}>Inventario</NavLink>}
+            {is("auditor", "admin") && <NavLink to="/reportes" className={link}>Reportes</NavLink>}
             {is("auditor", "admin") && <NavLink to="/auditoria" className={link}>Auditoría</NavLink>}
           </nav>
           <div className="ml-auto flex items-baseline gap-4">

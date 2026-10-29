@@ -33,6 +33,8 @@ export default function Appointments() {
   const [patients, setPatients] = useState([]);
   const [dentists, setDentists] = useState([]);
   const [chairs, setChairs] = useState([]);
+  const [patient, setPatient] = useState("");
+  const [planned, setPlanned] = useState([]); // RF-08: ítems aprobados del presupuesto del paciente
   const [fresh, setFresh] = useState(null);
   const [error, setError] = useState("");
 
@@ -46,13 +48,22 @@ export default function Appointments() {
     load();
   }, [from, to, filters]);
   useEffect(() => {
-    api("/api/patients/").then(setPatients);
+    setPlanned([]);
+    if (patient) api(`/api/budgets/pending/?patient=${patient}`).then(setPlanned);
+  }, [patient]);
+  useEffect(() => {
+    api("/api/patients/").then((list) => {
+      setPatients(list);
+      if (list.length) setPatient(String(list[0].id));
+    });
     api("/api/dentists/").then(setDentists);
     api("/api/chairs/").then(setChairs);
   }, []);
 
   const submit = formSubmit(async (data) => {
+    if (!data.budget_item) delete data.budget_item;
     const a = await api("/api/appointments/", { method: "POST", body: data });
+    api(`/api/budgets/pending/?patient=${patient}`).then(setPlanned);
     setFresh(a.id);
     const day = data.start.slice(0, 10);
     if (day >= from && day <= to) load();
@@ -189,10 +200,23 @@ export default function Appointments() {
         <div className="space-y-4 px-5 py-5">
           <div>
             <label className="label" htmlFor="patient">Paciente</label>
-            <select id="patient" name="patient" className="field" required>
+            <select id="patient" name="patient" className="field" required value={patient} onChange={(e) => setPatient(e.target.value)}>
               {patients.map((p) => <option key={p.id} value={p.id}>{p.last_name}, {p.first_name}</option>)}
             </select>
           </div>
+          {planned.length > 0 && (
+            <div>
+              <label className="label" htmlFor="budget_item">Del presupuesto aprobado</label>
+              <select id="budget_item" name="budget_item" className="field" defaultValue="">
+                <option value="">— Cita sin presupuesto —</option>
+                {planned.map((i) => (
+                  <option key={i.id} value={i.id}>
+                    Fase {i.phase} · {i.procedure_name}{i.tooth ? ` · pieza ${i.tooth}` : ""}{i.scheduled ? " (ya agendado)" : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="label" htmlFor="dentist">Odontólogo</label>
@@ -219,7 +243,7 @@ export default function Appointments() {
           </div>
           <div>
             <label className="label" htmlFor="reason">Motivo</label>
-            <input id="reason" name="reason" className="field" placeholder="Limpieza, control, dolor…" />
+            <input id="reason" name="reason" className="field" placeholder="Limpieza, control, dolor… (o el del presupuesto)" />
           </div>
           <p className="text-sm text-pencil">Al agendar se envía la confirmación al paciente; los recordatorios salen 48 h y 24 h antes.</p>
           <button className="btn w-full">Agendar cita</button>

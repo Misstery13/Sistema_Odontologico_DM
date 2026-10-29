@@ -15,10 +15,16 @@ router.register("perio", views.PerioExamViewSet, basename="perio")
 router.register("prescriptions", views.PrescriptionViewSet, basename="prescription")
 router.register("consent-templates", views.ConsentTemplateViewSet, basename="consent-template")
 router.register("consents", views.ConsentViewSet, basename="consent")
+router.register("procedures", views.ProcedureViewSet, basename="procedure")
+router.register("supplies", views.SupplyViewSet, basename="supply")
+router.register("stock-movements", views.StockMovementViewSet, basename="stock-movement")
+router.register("budgets", views.BudgetViewSet, basename="budget")
+router.register("commission-rules", views.CommissionRuleViewSet, basename="commission-rule")
 
 urlpatterns = [
     path("api/login/", views.login),
     path("api/dentists/", views.dentists),
+    path("api/reports/", views.reports),
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),  # OpenAPI 3
     path("api/", include(router.urls)),
 ]

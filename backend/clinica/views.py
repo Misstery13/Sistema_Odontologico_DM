@@ -3,7 +3,8 @@ import secrets
 from datetime import timedelta
 
 from django.contrib.auth import authenticate
-from django.db.models import Q
+from django.db import transaction
+from django.db.models import Count, F, Q, Sum
 from django.utils import timezone
 from rest_framework import viewsets
 from rest_framework.authtoken.models import Token
@@ -16,7 +17,7 @@ from rest_framework.throttling import AnonRateThrottle
 from .auth import RolePermission
 from .models import (
     Appointment, AuditLog, Chair, ClinicalNote, Consent, ConsentTemplate, Patient, PerioExam, Prescription, Tooth,
-    Treatment, User, sign,
+    Treatment, User, sign, Budget, BudgetItem, CommissionRule, Procedure, StockMovement, Supply,
 )
 from .notify import notify, send
 from .serializers import (
@@ -31,6 +32,12 @@ from .serializers import (
     PatientSerializer,
     ToothSerializer,
     TreatmentSerializer,
+    BudgetItemSerializer,
+    BudgetSerializer,
+    CommissionRuleSerializer,
+    ProcedureSerializer,
+    StockMovementSerializer,
+    SupplySerializer,
 )
 
 
@@ -136,12 +143,34 @@ class AppointmentViewSet(TenantViewSet):
         notify(super().perform_create(serializer), "confirmacion")
 
 
+def consume_supplies(treatment, user):
+    """RF-14: descarga los insumos de la receta estándar del procedimiento; devuelve el costo de materiales.
+    ponytail: el stock puede quedar negativo; el registro clínico no se bloquea por inventario, la alerta de stock bajo lo señala."""
+    cost = 0
+    for line in treatment.catalog.recipe.select_related("supply") if treatment.catalog else []:
+        Supply.objects.filter(pk=line.supply_id).update(stock=F("stock") - line.quantity)
+        StockMovement.objects.create(clinic_id=treatment.clinic_id, supply=line.supply, quantity=-line.quantity,
+                                     reason="consumo", treatment=treatment, user=user)
+        cost += line.quantity * line.supply.unit_cost
+    return round(cost, 2)
+
+
 class TreatmentViewSet(TenantViewSet):
     model = Treatment
     resource = "treatments"
     audited = True
     serializer_class = TreatmentSerializer
     http_method_names = ["get", "post", "head", "options"]  # RN-01: lo realizado no se edita ni se borra
+
+    def get_queryset(self):
+        return super().get_queryset().select_related("dentist")
+
+    @transaction.atomic
+    def perform_create(self, serializer):
+        t = serializer.save(clinic_id=self.request.tenant, dentist=self.request.user)
+        t.material_cost = consume_supplies(t, self.request.user)
+        t.save(update_fields=["material_cost"])
+        audit(self.request, "create", "Treatment", t.pk)
 
 
 class ClinicalNoteViewSet(TenantViewSet):
@@ -272,6 +301,137 @@ class ConsentViewSet(TenantViewSet):
         c.save()
         audit(request, "update", "Consent", c.pk)
         return Response(self.get_serializer(c).data)
+
+
+class ProcedureViewSet(TenantViewSet):
+    model = Procedure
+    resource = "catalog"
+    serializer_class = ProcedureSerializer
+    http_method_names = ["get", "post", "patch", "head", "options"]
+
+    def get_queryset(self):
+        return super().get_queryset().prefetch_related("recipe__supply")
+
+
+class SupplyViewSet(TenantViewSet):
+    model = Supply
+    resource = "supplies"
+    serializer_class = SupplySerializer
+    http_method_names = ["get", "post", "patch", "head", "options"]
+
+
+class StockMovementViewSet(TenantViewSet):
+    model = StockMovement
+    resource = "supplies"
+    serializer_class = StockMovementSerializer
+    http_method_names = ["get", "post", "head", "options"]
+
+    def get_queryset(self):
+        qs = super().get_queryset().select_related("supply", "user")
+        supply = self.request.query_params.get("supply")
+        return (qs.filter(supply_id=supply) if supply else qs)[:200]
+
+    @transaction.atomic
+    def perform_create(self, serializer):
+        m = serializer.save(clinic_id=self.request.tenant, user=self.request.user)
+        Supply.objects.filter(pk=m.supply_id).update(stock=F("stock") + m.quantity)
+
+
+class BudgetViewSet(TenantViewSet):
+    model = Budget
+    resource = "budgets"
+    action_resources = {"decide": "budget_decision"}
+    audited = True
+    serializer_class = BudgetSerializer
+    http_method_names = ["get", "post", "head", "options"]  # un presupuesto emitido no se edita: se emite otro
+
+    def get_queryset(self):
+        return super().get_queryset().select_related("author").prefetch_related("items__procedure", "items__appointments")
+
+    def perform_create(self, serializer):
+        obj = serializer.save(clinic_id=self.request.tenant, author=self.request.user)
+        audit(self.request, "create", "Budget", obj.pk)
+
+    @action(detail=True, methods=["post"])
+    def decide(self, request, pk=None):
+        """RF-08: el paciente aprueba todo o parte; lo aprobado queda listo para agendar."""
+        budget = self.get_object()
+        if budget.status != "pendiente":
+            raise ValidationError("El presupuesto ya fue decidido")
+        approved = {int(i) for i in request.data.get("approved_items", [])}
+        items = list(budget.items.all())
+        if not approved <= {i.pk for i in items}:
+            raise ValidationError({"approved_items": "Ítem inválido"})
+        for i in items:
+            i.approved = i.pk in approved
+        BudgetItem.objects.bulk_update(items, ["approved"])
+        budget.status = "rechazado" if not approved else "aprobado" if len(approved) == len(items) else "parcial"
+        budget.decided_at = timezone.now()
+        budget.save(update_fields=["status", "decided_at"])
+        audit(request, "update", "Budget", budget.pk)
+        return Response(self.get_serializer(budget).data)
+
+    @action(detail=False)
+    def pending(self, request):
+        """Ítems aprobados y aún no realizados del paciente: tareas para agendar o registrar."""
+        items = BudgetItem.objects.filter(
+            budget__clinic_id=request.tenant, budget__patient_id=request.query_params.get("patient"), approved=True, treatment__isnull=True
+        ).select_related("procedure", "budget").prefetch_related("appointments")
+        return Response(BudgetItemSerializer(items, many=True).data)
+
+
+class CommissionRuleViewSet(TenantViewSet):
+    model = CommissionRule
+    resource = "commissions"
+    serializer_class = CommissionRuleSerializer
+    http_method_names = ["get", "post", "patch", "head", "options"]
+
+    def get_queryset(self):
+        return super().get_queryset().select_related("dentist")
+
+
+@api_view(["GET"])
+@permission_classes([RolePermission])
+def reports(request):
+    """Reportes de gestión del período: producción, honorarios a liquidar (RF-13), agenda e inventario."""
+    start, end = request.query_params.get("from"), request.query_params.get("to")
+    if not start or not end:
+        raise ValidationError("Indica el rango ?from=AAAA-MM-DD&to=AAAA-MM-DD")
+    tenant = request.tenant
+    treatments = Treatment.objects.filter(clinic_id=tenant, date__gte=start, date__lte=end).select_related("dentist")
+    rules = {r.dentist_id: r for r in CommissionRule.objects.filter(clinic_id=tenant)}
+    by_dentist = {}
+    for t in treatments:
+        if not t.dentist_id:
+            continue
+        row = by_dentist.setdefault(t.dentist_id, {
+            "dentist": t.dentist.get_full_name() or t.dentist.username, "treatments": 0, "production": 0, "lab": 0, "materials": 0,
+            "rule": rules[t.dentist_id].get_kind_display() + f" ({rules[t.dentist_id].value})" if t.dentist_id in rules else "Sin regla",
+            "commission": 0,
+        })
+        row["treatments"] += 1
+        row["production"] += t.cost
+        row["lab"] += t.lab_cost
+        row["materials"] += t.material_cost
+        if t.dentist_id in rules:
+            row["commission"] += rules[t.dentist_id].amount(t)
+    appts = Appointment.objects.filter(clinic_id=tenant, start__date__gte=start, start__date__lte=end)
+    by_status = dict(appts.values_list("status").annotate(n=Count("id")))
+    attended = by_status.get("atendido", 0) + by_status.get("no_asistio", 0)
+    consumption = (StockMovement.objects.filter(clinic_id=tenant, reason="consumo", created_at__date__gte=start, created_at__date__lte=end)
+                   .values("supply__name", "supply__unit").annotate(quantity=-Sum("quantity")).order_by("-quantity"))
+    return Response({
+        "commissions": list(by_dentist.values()),
+        "top_procedures": list(treatments.values("procedure").annotate(count=Count("id"), production=Sum("cost")).order_by("-count")[:8]),
+        "appointments": by_status,
+        "no_show_rate": round(100 * by_status.get("no_asistio", 0) / attended, 1) if attended else None,
+        "new_patients": Patient.objects.filter(clinic_id=tenant, created_at__date__gte=start, created_at__date__lte=end).count(),
+        "consumption": list(consumption),
+        "low_stock": list(Supply.objects.filter(clinic_id=tenant, stock__lte=F("min_stock")).values("name", "unit", "stock", "min_stock")),
+    })
+
+
+reports.cls.resource = "reports"
 
 
 class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
