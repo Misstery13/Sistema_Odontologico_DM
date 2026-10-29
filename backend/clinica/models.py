@@ -9,8 +9,19 @@ from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils import timezone
 
-# Numeración FDI: cuadrantes 1-4, piezas 1-8 (11..18, 21..28, 31..38, 41..48)
+# Numeración FDI: permanentes cuadrantes 1-4, piezas 1-8 (11..48); temporales cuadrantes 5-8, piezas 1-5 (51..85)
 FDI_TEETH = [(q * 10 + n, str(q * 10 + n)) for q in range(1, 5) for n in range(1, 9)]
+TEMP_TEETH = [(q * 10 + n, str(q * 10 + n)) for q in range(5, 9) for n in range(1, 6)]
+ALL_TEETH = FDI_TEETH + TEMP_TEETH
+SURFACES = ("M", "D", "O", "V", "L")  # mesial, distal, oclusal/incisal, vestibular, lingual/palatino
+SURFACE_STATES = ("caries", "restauracion", "sellante")
+
+
+def sign(*parts):
+    """Firma digital del registro clínico.
+    ponytail: HMAC con SECRET_KEY; cambiar por firma con certificado del profesional cuando exista PKI."""
+    payload = "|".join(str(p) for p in parts)
+    return hmac.new(settings.SECRET_KEY.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
 ROLES = [
     ("admin", "Administrador TI"),
@@ -127,21 +138,25 @@ class Appointment(models.Model):
 
 
 class Tooth(models.Model):
-    """Estado de una pieza en el odontograma del paciente."""
+    """Pieza del odontograma (RF-03): condición de la pieza completa + hallazgos por superficie."""
 
+    # rojo = requerido / patología, azul = realizado (convención del catálogo)
     STATES = [
         ("sano", "Sano"),
-        ("caries", "Caries"),
-        ("obturado", "Obturado"),
-        ("endodoncia", "Endodoncia"),
-        ("corona", "Corona"),
+        ("endodoncia_requerida", "Endodoncia requerida"),
+        ("endodoncia", "Endodoncia realizada"),
+        ("implante", "Implante"),
+        ("protesis_fija", "Prótesis fija / corona"),
+        ("protesis_removible", "Prótesis removible"),
+        ("exodoncia_indicada", "Exodoncia indicada"),
         ("extraido", "Extraído"),
     ]
 
     clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE)
     patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="teeth")
-    number = models.PositiveSmallIntegerField(choices=FDI_TEETH)
-    state = models.CharField(max_length=12, choices=STATES)
+    number = models.PositiveSmallIntegerField(choices=ALL_TEETH)
+    state = models.CharField(max_length=20, choices=STATES, default="sano")
+    surfaces = models.JSONField(default=dict, blank=True)  # {"O": "caries", "M": "restauracion", ...}
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["patient", "number"], name="unique_tooth_per_patient")]
@@ -152,7 +167,7 @@ class Treatment(models.Model):
 
     clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE)
     patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="treatments")
-    tooth = models.PositiveSmallIntegerField(choices=FDI_TEETH, null=True, blank=True)
+    tooth = models.PositiveSmallIntegerField(choices=ALL_TEETH, null=True, blank=True)
     procedure = models.CharField(max_length=120)
     cost = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(0)])
     date = models.DateField()
@@ -186,13 +201,8 @@ class ClinicalNote(models.Model):
     def locked(self):
         return timezone.now() - self.created_at > timedelta(hours=settings.NOTE_LOCK_HOURS)
 
-    def sign(self):
-        # ponytail: firma HMAC con SECRET_KEY; cambiar por firma con certificado del profesional cuando exista PKI
-        payload = "|".join([str(self.author_id), self.created_at.isoformat(), self.subjective, self.objective, self.assessment, self.plan])
-        self.signature = hmac.new(settings.SECRET_KEY.encode(), payload.encode(), hashlib.sha256).hexdigest()
-
     def save(self, *args, **kwargs):
-        self.sign()
+        self.signature = sign(self.author_id, self.created_at.isoformat(), self.subjective, self.objective, self.assessment, self.plan)
         super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):
@@ -237,3 +247,104 @@ class Notification(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["appointment", "kind"], name="one_notification_per_kind")]
+
+
+class PerioExam(models.Model):
+    """Periodontograma (RF-04). `teeth`: {"16": {"pd": [6], "gm": [6], "bleeding": [6], "mobility": 0-3, "furcation": 0-3}}.
+    Sitios en orden MV, V, DV, ML, L, DL. Margen gingival positivo = recesión; NIC = PS + MG."""
+
+    clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE)
+    patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="perio_exams")
+    author = models.ForeignKey(User, on_delete=models.PROTECT)
+    created_at = models.DateTimeField(default=timezone.now)
+    teeth = models.JSONField(default=dict)
+    notes = models.TextField(blank=True)
+    signature = models.CharField(max_length=64, editable=False)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    @property
+    def summary(self):
+        sites = [(pd, gm, b) for t in self.teeth.values() for pd, gm, b in zip(t["pd"], t["gm"], t["bleeding"])]
+        if not sites:
+            return {"teeth": 0, "sites": 0, "bleeding_pct": 0, "deep_sites": 0, "mean_cal": 0}
+        return {
+            "teeth": len(self.teeth),
+            "sites": len(sites),
+            "bleeding_pct": round(100 * sum(b for _, _, b in sites) / len(sites), 1),
+            "deep_sites": sum(pd >= 4 for pd, _, _ in sites),  # bolsas de 4 mm o más
+            "mean_cal": round(sum(pd + gm for pd, gm, _ in sites) / len(sites), 2),
+        }
+
+    def save(self, *args, **kwargs):
+        self.signature = sign(self.author_id, self.created_at.isoformat(), self.teeth, self.notes)
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PermissionDenied("Los registros clínicos no se borran (RN-01)")
+
+
+class Prescription(models.Model):
+    """Receta odontológica firmada. `items`: [{"drug", "dose", "frequency", "duration", "instructions"}]."""
+
+    clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE)
+    patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="prescriptions")
+    author = models.ForeignKey(User, on_delete=models.PROTECT)
+    created_at = models.DateTimeField(default=timezone.now)
+    items = models.JSONField()
+    notes = models.TextField(blank=True)
+    allergy_override = models.CharField(max_length=200, blank=True)  # justificación si contradice una alergia
+    signature = models.CharField(max_length=64, editable=False)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def save(self, *args, **kwargs):
+        self.signature = sign(self.author_id, self.created_at.isoformat(), self.items, self.notes, self.allergy_override)
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PermissionDenied("Las recetas emitidas no se borran")
+
+
+class ConsentTemplate(models.Model):
+    """Formato legal de consentimiento por procedimiento (catálogo).
+    Marcadores: {paciente} {cedula} {procedimiento} {odontologo} {fecha}."""
+
+    clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE)
+    procedure = models.CharField(max_length=120)
+    body = models.TextField()
+
+    class Meta:
+        ordering = ["procedure"]
+
+    def __str__(self):
+        return self.procedure
+
+
+class Consent(models.Model):
+    """Consentimiento informado (RF-06): se firma una sola vez, en pantalla táctil o con código OTP."""
+
+    METHODS = [("biometrica", "Firma en pantalla"), ("otp", "Código OTP")]
+
+    clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE)
+    patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="consents")
+    created_by = models.ForeignKey(User, on_delete=models.PROTECT)
+    created_at = models.DateTimeField(default=timezone.now)
+    procedure = models.CharField(max_length=120)
+    text = models.TextField()  # copia del formato ya completado: lo firmado no cambia si cambia la plantilla
+    signer_name = models.CharField(max_length=120, blank=True)
+    signed_at = models.DateTimeField(null=True, blank=True)
+    method = models.CharField(max_length=10, choices=METHODS, blank=True)
+    signature_image = models.TextField(blank=True)  # PNG en data URL (firma biométrica)
+    otp_hash = models.CharField(max_length=64, blank=True)
+    otp_expires = models.DateTimeField(null=True, blank=True)
+    otp_attempts = models.PositiveSmallIntegerField(default=0)
+    signature = models.CharField(max_length=64, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def delete(self, *args, **kwargs):
+        raise PermissionDenied("Los consentimientos no se borran")

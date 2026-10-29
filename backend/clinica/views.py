@@ -1,22 +1,33 @@
+import hmac
+import secrets
+from datetime import timedelta
+
 from django.contrib.auth import authenticate
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework import viewsets
 from rest_framework.authtoken.models import Token
 from rest_framework.decorators import action, api_view, authentication_classes, permission_classes, throttle_classes
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle
 
 from .auth import RolePermission
-from .models import Appointment, AuditLog, Chair, ClinicalNote, Patient, Tooth, Treatment, User
-from .notify import notify
+from .models import (
+    Appointment, AuditLog, Chair, ClinicalNote, Consent, ConsentTemplate, Patient, PerioExam, Prescription, Tooth,
+    Treatment, User, sign,
+)
+from .notify import notify, send
 from .serializers import (
     AppointmentSerializer,
     AuditLogSerializer,
     ChairSerializer,
     ClinicalNoteSerializer,
+    ConsentSerializer,
+    ConsentTemplateSerializer,
+    PerioExamSerializer,
+    PrescriptionSerializer,
     PatientSerializer,
     ToothSerializer,
     TreatmentSerializer,
@@ -87,10 +98,11 @@ class PatientViewSet(TenantViewSet):
         if request.method == "POST":
             s = ToothSerializer(data=request.data)
             s.is_valid(raise_exception=True)
+            v = s.validated_data
             Tooth.objects.update_or_create(
                 patient=patient,
-                number=s.validated_data["number"],
-                defaults={"state": s.validated_data["state"], "clinic_id": patient.clinic_id},
+                number=v["number"],
+                defaults={"state": v.get("state", "sano"), "surfaces": v.get("surfaces", {}), "clinic_id": patient.clinic_id},
             )
         audit(request, "update" if request.method == "POST" else "read", "Tooth", patient.pk)
         return Response(ToothSerializer(patient.teeth.all(), many=True).data)
@@ -153,6 +165,113 @@ class ClinicalNoteViewSet(TenantViewSet):
         if note.locked:
             raise PermissionDenied("La nota está bloqueada; registra una adenda")
         super().perform_update(serializer)
+
+
+class AuthoredViewSet(TenantViewSet):
+    """Registros clínicos firmados (perio, recetas): se crean con su autor y no se editan ni borran (RN-01)."""
+
+    audited = True
+    http_method_names = ["get", "post", "head", "options"]
+
+    def get_queryset(self):
+        return super().get_queryset().select_related("author")
+
+    def perform_create(self, serializer):
+        obj = serializer.save(clinic_id=self.request.tenant, author=self.request.user)
+        audit(self.request, "create", self.model.__name__, obj.pk)
+
+
+class PerioExamViewSet(AuthoredViewSet):
+    model = PerioExam
+    resource = "perio"
+    serializer_class = PerioExamSerializer
+
+
+class PrescriptionViewSet(AuthoredViewSet):
+    model = Prescription
+    resource = "prescriptions"
+    serializer_class = PrescriptionSerializer
+
+
+class ConsentTemplateViewSet(TenantViewSet):
+    model = ConsentTemplate
+    resource = "consent_templates"
+    serializer_class = ConsentTemplateSerializer
+
+
+def mask(contact):
+    return f"{contact[:3]}…{contact[-2:]}"
+
+
+class ConsentViewSet(TenantViewSet):
+    """RF-06: el formato se copia completado al crearlo y se firma una vez (pantalla táctil u OTP)."""
+
+    model = Consent
+    resource = "consents"
+    audited = True
+    serializer_class = ConsentSerializer
+    http_method_names = ["get", "post", "head", "options"]
+    OTP_MINUTES = 10
+    OTP_MAX_ATTEMPTS = 5
+
+    def perform_create(self, serializer):
+        tpl, patient, user = serializer.validated_data.pop("template"), serializer.validated_data["patient"], self.request.user
+        text = tpl.body.format_map({
+            "paciente": f"{patient.first_name} {patient.last_name}",
+            "cedula": patient.cedula,
+            "procedimiento": tpl.procedure,
+            "odontologo": user.get_full_name() or user.username,
+            "fecha": timezone.localdate().strftime("%d/%m/%Y"),
+        })
+        obj = serializer.save(clinic_id=self.request.tenant, created_by=user, procedure=tpl.procedure, text=text)
+        audit(self.request, "create", "Consent", obj.pk)
+
+    def unsigned(self):
+        consent = self.get_object()
+        if consent.signed_at:
+            raise ValidationError("Este consentimiento ya fue firmado")
+        return consent
+
+    @action(detail=True, methods=["post"], url_path="request-otp")
+    def request_otp(self, request, pk=None):
+        c = self.unsigned()
+        p = c.patient
+        channel, recipient = ("whatsapp", p.phone) if p.phone else ("email", p.email)
+        if not recipient:
+            raise ValidationError("El paciente no tiene teléfono ni email para recibir el código")
+        code = f"{secrets.randbelow(10**6):06d}"
+        c.otp_hash, c.otp_expires, c.otp_attempts = sign("otp", c.pk, code), timezone.now() + timedelta(minutes=self.OTP_MINUTES), 0
+        c.save(update_fields=["otp_hash", "otp_expires", "otp_attempts"])
+        send(channel, recipient, f"Tu código para firmar el consentimiento de {c.procedure} es {code}. Vence en {self.OTP_MINUTES} minutos.")
+        return Response({"sent_to": mask(recipient), "channel": channel})
+
+    @action(detail=True, methods=["post"], url_path="sign")
+    def sign_consent(self, request, pk=None):
+        c = self.unsigned()
+        method, signer = request.data.get("method"), str(request.data.get("signer_name", "")).strip()
+        if not signer:
+            raise ValidationError({"signer_name": "Indica quién firma (paciente o tutor legal)"})
+        if method == "biometrica":
+            img = str(request.data.get("signature_image", ""))
+            if not img.startswith("data:image/png;base64,") or not 200 < len(img) < 400_000:
+                raise ValidationError({"signature_image": "Falta la firma o es inválida"})
+            c.signature_image = img
+        elif method == "otp":
+            if not c.otp_hash or timezone.now() > c.otp_expires:
+                raise ValidationError({"code": "El código venció; solicita uno nuevo"})
+            if c.otp_attempts >= self.OTP_MAX_ATTEMPTS:
+                raise ValidationError({"code": "Demasiados intentos; solicita un código nuevo"})
+            if not hmac.compare_digest(c.otp_hash, sign("otp", c.pk, str(request.data.get("code", "")).strip())):
+                c.otp_attempts += 1
+                c.save(update_fields=["otp_attempts"])
+                raise ValidationError({"code": "Código incorrecto"})
+        else:
+            raise ValidationError({"method": "Método de firma inválido"})
+        c.method, c.signer_name, c.signed_at = method, signer, timezone.now()
+        c.signature = sign(c.pk, c.text, signer, method, c.signed_at.isoformat(), c.signature_image or c.otp_hash)
+        c.save()
+        audit(request, "update", "Consent", c.pk)
+        return Response(self.get_serializer(c).data)
 
 
 class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):

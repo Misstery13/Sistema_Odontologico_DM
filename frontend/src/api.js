@@ -44,3 +44,13 @@ export const formSubmit = (fn, setError) => async (e) => {
 // la autorización real vive en el backend; esto solo decide qué controles mostrar
 export const is = (...roles) => roles.includes(getSession()?.role);
 export const STAFF = ["recepcion", "odontologo", "asistente"];
+
+// imprime solo un documento (receta, consentimiento): el resto de la página queda oculto vía CSS @media print
+export const printElement = (el) => {
+  el.classList.add("print-doc");
+  document.body.classList.add("printing");
+  addEventListener("afterprint", () => { el.classList.remove("print-doc"); document.body.classList.remove("printing"); }, { once: true });
+  print();
+};
+
+export const fmtDateTime = (s) => new Date(s).toLocaleString("es-EC", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });

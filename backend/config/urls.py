@@ -11,6 +11,10 @@ router.register("treatments", views.TreatmentViewSet, basename="treatment")
 router.register("notes", views.ClinicalNoteViewSet, basename="note")
 router.register("chairs", views.ChairViewSet, basename="chair")
 router.register("audit", views.AuditLogViewSet, basename="audit")
+router.register("perio", views.PerioExamViewSet, basename="perio")
+router.register("prescriptions", views.PrescriptionViewSet, basename="prescription")
+router.register("consent-templates", views.ConsentTemplateViewSet, basename="consent-template")
+router.register("consents", views.ConsentViewSet, basename="consent")
 
 urlpatterns = [
     path("api/login/", views.login),

@@ -3,34 +3,10 @@ import { useParams } from "react-router-dom";
 import { api, formSubmit, getSession, is, money } from "../api.js";
 import PatientForm from "../PatientForm.jsx";
 
-// cada estado tiene color y forma propios, legible aunque no se vea el color
-const STATES = {
-  sano: "Sano",
-  caries: "Caries",
-  obturado: "Obturado",
-  endodoncia: "Endodoncia",
-  corona: "Corona",
-  extraido: "Extraído",
-};
-const PEN = "var(--color-pen)";
-const MARKS = {
-  sano: <circle cx="12" cy="12" r="7" fill="none" stroke="var(--color-rule)" strokeWidth="1.5" />,
-  caries: <circle cx="12" cy="12" r="6.5" fill="var(--color-red)" />,
-  obturado: <rect x="5.5" y="5.5" width="13" height="13" rx="2" fill={PEN} />,
-  endodoncia: <path d="M12 4v16M8.5 7.5h7" stroke={PEN} strokeWidth="2.5" strokeLinecap="round" fill="none" />,
-  corona: <circle cx="12" cy="12" r="7.5" fill="none" stroke={PEN} strokeWidth="2.5" />,
-  extraido: <path d="M6 6l12 12M18 6L6 18" stroke={PEN} strokeWidth="2.5" strokeLinecap="round" />,
-};
-const Mark = ({ state, size = 24 }) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">{MARKS[state]}</svg>
-);
-
-// arcada superior 18→11 | 21→28, inferior 48→41 | 31→38 (vista del odontólogo)
-const quadrant = (q) => [1, 2, 3, 4, 5, 6, 7, 8].map((n) => q * 10 + n);
-const ARCHES = [
-  [...quadrant(1).reverse(), ...quadrant(2)],
-  [...quadrant(4).reverse(), ...quadrant(3)],
-];
+import Odontogram, { pendingFindings } from "../Odontogram.jsx";
+import Consents from "../clinical/Consents.jsx";
+import Perio from "../clinical/Perio.jsx";
+import Prescriptions from "../clinical/Prescriptions.jsx";
 
 const fmtDate = (d) => new Date(`${d}T12:00`).toLocaleDateString("es-EC", { day: "2-digit", month: "2-digit", year: "numeric" });
 
@@ -85,10 +61,11 @@ export default function PatientDetail() {
           <span className="text-xs font-semibold tracking-[0.1em] lg:[writing-mode:vertical-rl] lg:rotate-180">HC {String(patient.id).padStart(6, "0")}</span>
         </div>
         <PatientData patient={patient} onEdit={is("recepcion", "odontologo") ? () => setEditing(true) : null} />
-        <Odontogram patientId={id} teeth={teeth} setTeeth={setTeeth} onTreatment={() => setRev(rev + 1)} />
+        <Treatments patientId={id} teeth={teeth} onChange={() => setRev(rev + 1)} />
         <Payments patientId={id} rev={rev} />
       </article>
-      {is("odontologo", "asistente") && <Notes patientId={id} />}
+      <Odontogram patientId={id} teeth={teeth} setTeeth={setTeeth} />
+      {is("odontologo", "asistente") && <ClinicalRecord patient={patient} teeth={teeth} />}
     </div>
   );
 }
@@ -165,65 +142,7 @@ function PatientData({ patient, onEdit }) {
   );
 }
 
-function Odontogram({ patientId, teeth, setTeeth, onTreatment }) {
-  const [brush, setBrush] = useState("caries");
-  const [error, setError] = useState("");
-  const url = `/api/patients/${patientId}/odontogram/`;
-  const apply = (list) => setTeeth(Object.fromEntries(list.map((t) => [t.number, t.state])));
-
-  useEffect(() => {
-    api(url).then(apply);
-  }, [url]);
-
-  const paint = async (number) => {
-    setError("");
-    try {
-      apply(await api(url, { method: "POST", body: { number, state: brush } }));
-    } catch (e) {
-      setError(e.message);
-    }
-  };
-  const pending = Object.entries(teeth).filter(([, s]) => s === "caries").map(([n]) => n).sort();
-  const canEdit = is("odontologo");
-
-  return (
-    <Panel title="Odontograma">
-      {canEdit && <div className="flex flex-wrap gap-1.5" role="group" aria-label="Estado a marcar">
-        {Object.entries(STATES).map(([key, label]) => (
-          <button key={key} onClick={() => setBrush(key)} aria-pressed={brush === key}
-            className={`flex items-center gap-1.5 rounded-[3px] border px-2 py-1 text-sm ${brush === key ? "border-pen bg-rule/60 font-semibold text-pen" : "border-rule text-print hover:border-pen"}`}>
-            <Mark state={key} size={16} /> {label}
-          </button>
-        ))}
-      </div>}
-      <div className="mt-4 overflow-x-auto pb-1">
-        {ARCHES.map((row, i) => (
-          <div key={i} className={`grid min-w-[440px] grid-cols-[repeat(8,minmax(0,1fr))_8px_repeat(8,minmax(0,1fr))] gap-[3px] ${i ? "mt-2 border-t border-print pt-2" : ""}`}>
-            {row.map((n, j) => (
-              <button key={n} onClick={() => paint(n)} disabled={!canEdit} aria-label={`Pieza ${n}: ${STATES[teeth[n] || "sano"]}`}
-                className={`flex h-14 flex-col items-center justify-between border border-print/60 py-1 enabled:hover:border-pen enabled:hover:bg-rule/30 ${j === 8 ? "col-start-10" : ""}`}>
-                <span className="text-[11px] font-semibold leading-none">{n}</span>
-                <Mark state={teeth[n] || "sano"} />
-              </button>
-            ))}
-          </div>
-        ))}
-      </div>
-      {canEdit && <p className="mt-2 text-sm text-pencil">Elige un estado y marca la pieza.</p>}
-      {error && <p className="error mt-1">{error}</p>}
-
-      <h3 className="label mt-6 border-b-2 border-print pb-1">Por tratar</h3>
-      {pending.length ? (
-        <ul>{pending.map((n) => <li key={n} className="rule-row flex items-center gap-2 py-1.5 text-pencil"><Mark state="caries" size={14} /> Pieza {n} · caries</li>)}</ul>
-      ) : (
-        <p className="py-2 text-sm text-pencil">Ninguna pieza con caries marcada.</p>
-      )}
-      <Treatments patientId={patientId} onChange={onTreatment} />
-    </Panel>
-  );
-}
-
-function Treatments({ patientId, onChange }) {
+function Treatments({ patientId, teeth, onChange }) {
   const [items, setItems] = useState([]);
   const [fresh, setFresh] = useState(null);
   const [error, setError] = useState("");
@@ -239,8 +158,16 @@ function Treatments({ patientId, onChange }) {
     onChange();
   }, setError);
 
+  const pending = pendingFindings(teeth);
+
   return (
-    <>
+    <Panel title="Tratamientos">
+      <h3 className="label border-b-2 border-print pb-1">Por tratar</h3>
+      {pending.length ? (
+        <ul>{pending.map((f) => <li key={f} className="rule-row py-1.5 font-medium text-red">{f}</li>)}</ul>
+      ) : (
+        <p className="py-2 text-sm text-pencil">Sin hallazgos pendientes en el odontograma.</p>
+      )}
       <h3 className="label mt-6 flex justify-between border-b-2 border-print pb-1">
         <span>Realizado</span>
         <span>{money(items.reduce((s, t) => s + Number(t.cost), 0))}</span>
@@ -259,14 +186,14 @@ function Treatments({ patientId, onChange }) {
       </ul>
       {is("odontologo") && <form onSubmit={submit} className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
         <label className="col-span-2"><span className="label">Procedimiento</span><input name="procedure" className="field" required /></label>
-        <label><span className="label">Pieza</span><input name="tooth" type="number" min="11" max="48" className="field" placeholder="Opcional" /></label>
+        <label><span className="label">Pieza</span><input name="tooth" type="number" min="11" max="85" className="field" placeholder="Opcional" /></label>
         <label><span className="label">Costo $</span><input name="cost" type="number" step="0.01" min="0" className="field" required /></label>
         <label className="col-span-2"><span className="label">Fecha</span><input name="date" type="date" className="field" required defaultValue={new Date().toLocaleDateString("sv")} /></label>
         <label className="col-span-2"><span className="label">Notas</span><input name="notes" className="field" /></label>
         {error && <p className="error col-span-full" role="alert">{error}</p>}
         <button className="btn col-span-full sm:col-span-2 sm:col-start-3">Registrar tratamiento</button>
       </form>}
-    </>
+    </Panel>
   );
 }
 
@@ -434,6 +361,31 @@ function Notes({ patientId }) {
       <div className="border-t-2 border-print px-5 py-5">
         <h3 className="label-red mb-3">Nueva nota</h3>
         <NoteForm label="Firmar y guardar nota" onSave={(d) => save(d)} />
+      </div>
+    </section>
+  );
+}
+
+// expediente clínico (solo personal clínico): evolución, periodontograma, recetas y consentimientos
+const TABS = { soep: "Evolución SOEP", perio: "Periodontograma", recetas: "Recetas", consentimientos: "Consentimientos" };
+
+function ClinicalRecord({ patient, teeth }) {
+  const [tab, setTab] = useState("soep");
+  return (
+    <section>
+      <div role="tablist" className="flex flex-wrap gap-1">
+        {Object.entries(TABS).map(([k, v]) => (
+          <button key={k} role="tab" aria-selected={tab === k} onClick={() => setTab(k)}
+            className={`rounded-t-[3px] px-4 py-2 text-sm font-semibold ${tab === k ? "bg-card text-pen" : "text-print hover:text-pen"}`}>
+            {v}
+          </button>
+        ))}
+      </div>
+      <div role="tabpanel">
+        {tab === "soep" && <Notes patientId={patient.id} />}
+        {tab === "perio" && <Perio patient={patient} teeth={teeth} />}
+        {tab === "recetas" && <Prescriptions patient={patient} />}
+        {tab === "consentimientos" && <Consents patient={patient} />}
       </div>
     </section>
   );

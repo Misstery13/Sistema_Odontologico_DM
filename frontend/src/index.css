@@ -68,3 +68,10 @@
 @media (prefers-reduced-motion: reduce) {
   .write-in { animation: none; }
 }
+
+@media print {
+  body.printing * { visibility: hidden; }
+  body.printing .print-doc, body.printing .print-doc * { visibility: visible; }
+  body.printing .print-doc { position: absolute; inset: 0 auto auto 0; width: 100%; box-shadow: none; }
+  body.printing { background: white; }
+}

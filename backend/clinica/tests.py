@@ -107,10 +107,73 @@ class ClinicaTests(APITestCase):
         kinds = sorted(Notification.objects.values_list("kind", flat=True))
         self.assertEqual(kinds, ["confirmacion", "recordatorio_48h"])
 
-    def test_odontogram_upsert(self):
+    def test_odontogram_surfaces_and_temporary_teeth(self):
         self.auth(self.dentist_a)
         url = f"/api/patients/{self.patient_a.id}/odontogram/"
-        self.client.post(url, {"number": 11, "state": "caries"})
-        teeth = self.client.post(url, {"number": 11, "state": "obturado"}).json()
-        self.assertEqual(teeth, [{"number": 11, "state": "obturado"}])
-        self.assertEqual(self.client.post(url, {"number": 19, "state": "caries"}).status_code, 400)
+        self.client.post(url, {"number": 36, "state": "sano", "surfaces": {"O": "caries"}}, format="json")
+        teeth = self.client.post(url, {"number": 36, "state": "endodoncia", "surfaces": {"O": "restauracion", "M": "caries"}}, format="json").json()
+        self.assertEqual(teeth, [{"number": 36, "state": "endodoncia", "surfaces": {"O": "restauracion", "M": "caries"}}])
+        self.assertEqual(self.client.post(url, {"number": 55, "state": "extraido", "surfaces": {}}, format="json").status_code, 200)
+        self.assertEqual(self.client.post(url, {"number": 19, "state": "sano"}, format="json").status_code, 400)
+        self.assertEqual(self.client.post(url, {"number": 11, "surfaces": {"X": "caries"}}, format="json").status_code, 400)
+        self.assertEqual(self.client.post(url, {"number": 11, "surfaces": {"O": "fractura"}}, format="json").status_code, 400)
+
+    def test_periodontogram_summary(self):
+        self.auth(self.dentist_a)
+        site = lambda pd, gm, b: {"pd": [pd] * 6, "gm": [gm] * 6, "bleeding": [b] * 6, "mobility": 1, "furcation": 0}
+        r = self.client.post("/api/perio/", {"patient": self.patient_a.id, "teeth": {"16": site(5, 2, True), "11": site(2, 0, False)}}, format="json")
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.json()["summary"], {"teeth": 2, "sites": 12, "bleeding_pct": 50.0, "deep_sites": 6, "mean_cal": 4.5})
+        bad = {"patient": self.patient_a.id, "teeth": {"16": {**site(5, 2, True), "pd": [5, 5]}}}
+        self.assertEqual(self.client.post("/api/perio/", bad, format="json").status_code, 400)
+        self.assertEqual(self.client.delete(f"/api/perio/{r.json()['id']}/").status_code, 405)
+        self.auth(self.recep_a)
+        self.assertEqual(self.client.get("/api/perio/").status_code, 403)
+
+    def test_prescription_allergy_check(self):
+        self.patient_a.allergies = "Penicilina"
+        self.patient_a.save()
+        self.auth(self.dentist_a)
+        item = {"drug": "Amoxicilina 500 mg", "dose": "1 cápsula", "frequency": "cada 8 h", "duration": "7 días"}
+        r = self.client.post("/api/prescriptions/", {"patient": self.patient_a.id, "items": [item]}, format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("allergy_override", r.json())
+        ok = {"patient": self.patient_a.id, "items": [{**item, "drug": "Clindamicina 300 mg"}]}
+        self.assertEqual(self.client.post("/api/prescriptions/", ok, format="json").status_code, 201)
+        forced = {"patient": self.patient_a.id, "items": [item], "allergy_override": "Prueba cutánea negativa 2026"}
+        self.assertEqual(self.client.post("/api/prescriptions/", forced, format="json").status_code, 201)
+        self.assertEqual(self.client.post("/api/prescriptions/", {"patient": self.patient_a.id, "items": [{"drug": "x"}]}, format="json").status_code, 400)
+
+    def consent(self):
+        from .models import ConsentTemplate
+        tpl = ConsentTemplate.objects.create(clinic=self.patient_a.clinic, procedure="Exodoncia", body="Yo {paciente} ({cedula}) autorizo {procedimiento} con {odontologo} el {fecha}.")
+        r = self.client.post("/api/consents/", {"patient": self.patient_a.id, "template": tpl.id})
+        self.assertEqual(r.status_code, 201)
+        self.assertTrue(r.json()["text"].startswith("Yo P A (1) autorizo Exodoncia con a"))
+        return r.json()["id"]
+
+    def test_consent_biometric_signature(self):
+        self.auth(self.dentist_a)
+        cid = self.consent()
+        url = f"/api/consents/{cid}/sign/"
+        self.assertEqual(self.client.post(url, {"method": "biometrica", "signer_name": "P A", "signature_image": "nope"}).status_code, 400)
+        img = "data:image/png;base64," + "A" * 400
+        r = self.client.post(url, {"method": "biometrica", "signer_name": "P A", "signature_image": img})
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["signed"])
+        self.assertEqual(self.client.post(url, {"method": "biometrica", "signer_name": "P A", "signature_image": img}).status_code, 400)  # una sola vez
+
+    def test_consent_otp_signature(self):
+        from unittest import mock
+        self.auth(self.dentist_a)
+        cid = self.consent()
+        with mock.patch("clinica.views.send") as send:
+            self.assertEqual(self.client.post(f"/api/consents/{cid}/request-otp/").status_code, 200)
+        code = send.call_args.args[2].split("es ")[1][:6]
+        url = f"/api/consents/{cid}/sign/"
+        wrong = "000000" if code != "000000" else "111111"
+        self.assertEqual(self.client.post(url, {"method": "otp", "signer_name": "P A", "code": wrong}).status_code, 400)
+        r = self.client.post(url, {"method": "otp", "signer_name": "P A", "code": code})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["method"], "otp")
+        self.assertNotIn("otp_hash", r.json())

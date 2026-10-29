@@ -3,7 +3,10 @@ from datetime import timedelta
 from django.db.models import Q
 from rest_framework import serializers
 
-from .models import Appointment, AuditLog, Chair, ClinicalNote, Patient, Tooth, Treatment
+from .models import (
+    FDI_TEETH, SURFACE_STATES, SURFACES, Appointment, AuditLog, Chair, ClinicalNote, Consent, ConsentTemplate,
+    Patient, PerioExam, Prescription, Tooth, Treatment,
+)
 
 
 class TenantSerializer(serializers.ModelSerializer):
@@ -92,7 +95,12 @@ class AppointmentSerializer(TenantSerializer):
 class ToothSerializer(serializers.ModelSerializer):
     class Meta:
         model = Tooth
-        fields = ["number", "state"]
+        fields = ["number", "state", "surfaces"]
+
+    def validate_surfaces(self, value):
+        if not isinstance(value, dict) or any(k not in SURFACES or v not in SURFACE_STATES for k, v in value.items()):
+            raise serializers.ValidationError(f"Superficies válidas: {', '.join(SURFACES)}; hallazgos: {', '.join(SURFACE_STATES)}")
+        return value
 
 
 class TreatmentSerializer(TenantSerializer):
@@ -130,3 +138,116 @@ class AuditLogSerializer(serializers.ModelSerializer):
     class Meta:
         model = AuditLog
         exclude = ["clinic"]
+
+
+class AuthoredSerializer(TenantSerializer):
+    """Registro clínico firmado por su autor: autor, fecha y firma los pone el servidor."""
+
+    author_name = serializers.SerializerMethodField()
+
+    def get_author_name(self, obj):
+        return obj.author.get_full_name() or obj.author.username
+
+
+PERMANENT = {str(n) for n, _ in FDI_TEETH}
+
+
+class PerioExamSerializer(AuthoredSerializer):
+    summary = serializers.DictField(read_only=True)
+
+    class Meta:
+        model = PerioExam
+        exclude = ["clinic"]
+        read_only_fields = ["author", "created_at", "signature"]
+
+    def validate_teeth(self, value):
+        def ints(v, lo, hi, n=6):
+            return isinstance(v, list) and len(v) == n and all(isinstance(x, int) and not isinstance(x, bool) and lo <= x <= hi for x in v)
+
+        if not isinstance(value, dict) or not value:
+            raise serializers.ValidationError("Registra al menos una pieza")
+        for tooth, t in value.items():
+            ok = (
+                tooth in PERMANENT
+                and isinstance(t, dict)
+                and ints(t.get("pd"), 0, 15)  # profundidad al sondaje (mm)
+                and ints(t.get("gm"), -10, 15)  # margen gingival (mm, + recesión)
+                and isinstance(t.get("bleeding"), list) and len(t["bleeding"]) == 6 and all(isinstance(b, bool) for b in t["bleeding"])
+                and t.get("mobility", 0) in (0, 1, 2, 3)
+                and t.get("furcation", 0) in (0, 1, 2, 3)
+            )
+            if not ok:
+                raise serializers.ValidationError(f"Datos inválidos en la pieza {tooth}")
+        return value
+
+
+# ponytail: lista corta de alergias cruzadas frecuentes en odontología; reemplazar por un vademécum cuando exista
+CROSS_ALLERGIES = {
+    "penicilina": ["penicilina", "amoxicilina", "ampicilina", "dicloxacilina", "oxacilina"],
+    "sulfa": ["sulfametoxazol", "sulfadiazina"],
+    "aine": ["ibuprofeno", "naproxeno", "diclofenaco", "ketorolaco", "aspirina", "acido acetilsalicilico", "ketoprofeno"],
+    "aspirina": ["aspirina", "acido acetilsalicilico"],
+    "ibuprofeno": ["ibuprofeno"],
+    "lidocaina": ["lidocaina"],
+    "articaina": ["articaina"],
+}
+
+
+def _norm(text):
+    return text.lower().translate(str.maketrans("áéíóú", "aeiou"))
+
+
+def allergy_conflicts(allergies, drugs):
+    allergies = _norm(allergies)
+    out = []
+    for drug in drugs:
+        d = _norm(drug)
+        for key, members in CROSS_ALLERGIES.items():
+            if key in allergies and any(m in d for m in members):
+                out.append(drug)
+                break
+        else:
+            if any(w and w in d for w in allergies.replace(",", " ").split() if len(w) > 4):
+                out.append(drug)
+    return out
+
+
+class PrescriptionSerializer(AuthoredSerializer):
+    class Meta:
+        model = Prescription
+        exclude = ["clinic"]
+        read_only_fields = ["author", "created_at", "signature"]
+
+    def validate_items(self, value):
+        keys = ("drug", "dose", "frequency", "duration")
+        if not isinstance(value, list) or not value or any(not isinstance(i, dict) or not all(str(i.get(k, "")).strip() for k in keys) for i in value):
+            raise serializers.ValidationError("Cada medicamento necesita nombre, dosis, frecuencia y duración")
+        return [{k: str(i.get(k, "")).strip() for k in (*keys, "instructions")} for i in value]
+
+    def validate(self, data):
+        conflicts = allergy_conflicts(data["patient"].allergies, [i["drug"] for i in data["items"]])
+        if conflicts and not data.get("allergy_override", "").strip():
+            raise serializers.ValidationError(
+                {"allergy_override": f"Alerta de alergia ({data['patient'].allergies}): {', '.join(conflicts)}. Justifica para emitir."}
+            )
+        return data
+
+
+class ConsentTemplateSerializer(TenantSerializer):
+    class Meta:
+        model = ConsentTemplate
+        exclude = ["clinic"]
+
+
+class ConsentSerializer(TenantSerializer):
+    template = serializers.PrimaryKeyRelatedField(queryset=ConsentTemplate.objects.all(), write_only=True)
+    created_by_name = serializers.StringRelatedField(source="created_by", read_only=True)
+    signed = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Consent
+        exclude = ["clinic", "otp_hash", "otp_attempts"]
+        read_only_fields = ["created_by", "created_at", "procedure", "text", "signer_name", "signed_at", "method", "signature_image", "otp_expires", "signature"]
+
+    def get_signed(self, obj):
+        return obj.signed_at is not None

@@ -25,7 +25,7 @@ Abrir http://localhost:8080 (usuarios en la tabla de roles más abajo).
 
 Escaneo de seguridad (con el sistema levantado): `docker compose --profile zap run --rm zap`
 
-## Alcance implementado (SRS SIGO-Dental, Fase 1 + reglas de negocio)
+## Alcance implementado (SRS SIGO-Dental, Fases 1 y 2)
 
 Requisitos en `docs/Documento de Requerimientos de Software - Sistema Odontológico.md.pdf`.
 
@@ -33,7 +33,10 @@ Requisitos en `docs/Documento de Requerimientos de Software - Sistema Odontológ
 |---|---|
 | RF-01 | Ficha única: datos, contacto de emergencia, tutor legal (obligatorio si es menor), seguro; alta y edición |
 | RF-02 | Anamnesis obligatoria; badge rojo en la cabecera del expediente (alergias, anticoagulado, coagulopatía) |
-| RF-03 (parcial) | Odontograma FDI de 32 piezas con estados por pieza (temporales, Universal y superficies: Fase 2) |
+| RF-03 | Odontograma SVG: dentición permanente (32) y temporal (20), notación FDI o Universal, 5 superficies (M, D, O/I, V, L/P); caries, restauración, sellante por superficie; endodoncia requerida/realizada, implante, prótesis fija/removible, exodoncia indicada/realizada por pieza. Lo rojo alimenta la lista "Por tratar" |
+| RF-04 | Periodontograma: PS y margen gingival en 6 sitios, sangrado, movilidad, furca; NIC = PS + MG; resumen (% sangrado, bolsas ≥ 4 mm, NIC promedio); firmado e inmutable |
+| Recetas | Receta firmada e imprimible; bloquea medicamentos que cruzan con alergias registradas (p. ej. penicilina → amoxicilina) salvo justificación |
+| RF-06 | Consentimiento por procedimiento desde catálogo; firma en pantalla táctil (canvas) o por código OTP (6 dígitos, 10 min, 5 intentos; envío **simulado**, ver `docker compose logs backend`); se firma una vez e imprime |
 | RF-05 / RN-01 | Notas SOEP firmadas (HMAC), editables solo por su autor durante 24 h (`NOTE_LOCK_HOURS`), luego adendas; tratamientos y notas no se borran |
 | RF-09 | Agenda día/semana filtrable por sillón y odontólogo |
 | RF-10 | Estados: programado, confirmado, en sala de espera, en atención, atendido, cancelado, no asistió |
@@ -45,14 +48,14 @@ Requisitos en `docs/Documento de Requerimientos de Software - Sistema Odontológ
 | RNF-06 | Log de auditoría inmutable (usuario, acción, registro, timestamp ISO-8601, IP) |
 | 8.2 | OpenAPI 3 en `/api/schema/` |
 
-Fuera de esta entrega: RF-04 periodontograma, RF-06 consentimiento con firma, RF-07/08 presupuestos, RF-13 honorarios, RF-14 inventario, MFA y cifrado en reposo.
+Fuera de esta entrega (Fase 3 y pendientes): RF-07/08 presupuestos, RF-13 honorarios, RF-14 inventario, reportes BI, MFA y cifrado en reposo. La firma digital es HMAC del servidor, no certificado personal del profesional.
 
 ### Roles demo (contraseña `odonto123`)
 
 | Usuario | Rol | Ve |
 |---|---|---|
-| `dra.lopez`, `dr.perez` | Odontólogo | Agenda, pacientes, odontograma, tratamientos, notas SOEP |
-| `asistente` | Asistente dental | Agenda, pacientes, notas SOEP |
+| `dra.lopez`, `dr.perez` | Odontólogo | Agenda, pacientes, odontograma, tratamientos, SOEP, periodontograma, recetas, consentimientos |
+| `asistente` | Asistente dental | Agenda, pacientes, SOEP, consentimientos (lectura de perio y recetas) |
 | `recepcion` | Recepcionista / cajero | Agenda, pacientes, cobros, cierre de caja |
 | `auditor` | Auditor / contador | Cierres de caja, auditoría |
 | `admin` | Administrador TI | Cierres de caja, auditoría (sin datos clínicos) |

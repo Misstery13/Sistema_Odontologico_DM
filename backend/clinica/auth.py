@@ -20,6 +20,10 @@ PERMISSIONS = {
     "chairs": (STAFF | {"admin"}, {"admin"}),
     "dentists": (STAFF, set()),
     "audit": ({"admin", "auditor"}, set()),
+    "perio": ({"odontologo", "asistente"}, {"odontologo"}),
+    "prescriptions": ({"odontologo", "asistente"}, {"odontologo"}),
+    "consents": ({"odontologo", "asistente"}, {"odontologo", "asistente"}),
+    "consent_templates": ({"odontologo", "asistente", "admin"}, {"admin"}),
 }
 
 
