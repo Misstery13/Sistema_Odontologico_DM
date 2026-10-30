@@ -3,7 +3,7 @@ from datetime import timedelta
 from django.conf import settings
 from django.utils import timezone
 from rest_framework.authentication import TokenAuthentication
-from rest_framework.exceptions import AuthenticationFailed
+from rest_framework.exceptions import AuthenticationFailed, PermissionDenied
 from rest_framework.permissions import SAFE_METHODS, BasePermission
 
 from .models import User
@@ -30,6 +30,7 @@ PERMISSIONS = {
     "budget_decision": (set(), {"recepcion", "odontologo"}),  # registra la aprobación del paciente
     "commissions": ({"auditor", "admin"}, {"auditor", "admin"}),
     "reports": ({"auditor", "admin"}, set()),
+    "users": ({"admin"}, {"admin"}),
 }
 
 
@@ -53,6 +54,8 @@ class RolePermission(BasePermission):
     def has_permission(self, request, view):
         if not request.user.is_authenticated or request.tenant is None:
             return False
+        if request.user.must_change_password:
+            raise PermissionDenied("Debes cambiar tu contraseña temporal antes de continuar")
         resource = getattr(view, "action_resources", {}).get(getattr(view, "action", None), view.resource)
         read, write = PERMISSIONS[resource]
         return request.user.role in (read if request.method in SAFE_METHODS else write)

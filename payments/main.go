@@ -34,6 +34,7 @@ type Payment struct {
 	Amount    float64   `json:"amount"`
 	Method    string    `json:"method"`
 	Invoice   string    `json:"invoice_number"`
+	Auth      string    `json:"authorization,omitempty"` // código de la pasarela (tarjeta)
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -59,6 +60,14 @@ var (
 )
 
 const idleMinutes = 15
+
+// authorizeCard cobra la tarjeta en la pasarela y devuelve el código de autorización.
+// ponytail: adaptador simulado (siempre aprueba, solo log); conectar aquí Stripe / dLocal / la pasarela bancaria.
+var authorizeCard = func(cents int64, clinic int64) (string, error) {
+	code := fmt.Sprintf("SIM-%06d", time.Now().UnixNano()%1_000_000)
+	log.Printf("[pasarela simulada] clínica %d autoriza %.2f con código %s", clinic, float64(cents)/100, code)
+	return code, nil
+}
 
 // issueInvoice emite el comprobante electrónico.
 // ponytail: adaptador simulado (solo log); conectar aquí la API de facturación electrónica del SRI.
@@ -92,6 +101,7 @@ func connect(ctx context.Context, dbURL, redisURL string) (*App, error) {
 			method TEXT NOT NULL,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
 		`ALTER TABLE payments ADD COLUMN IF NOT EXISTS invoice_number TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE payments ADD COLUMN IF NOT EXISTS authorization_code TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS payments_patient_idx ON payments (clinic_id, patient_id)`,
 		`CREATE TABLE IF NOT EXISTS cash_closings (
 			id BIGSERIAL PRIMARY KEY,
@@ -166,7 +176,7 @@ func (a *App) auth(c *fiber.Ctx) error {
 	} else { // no está en caché (o Redis caído): ir a la base y contar esta petición como actividad
 		err := a.db.QueryRow(ctx, `
 			UPDATE clinica_user u SET last_activity = now() FROM authtoken_token t
-			WHERE t.key = $1 AND u.id = t.user_id AND u.is_active AND u.clinic_id IS NOT NULL
+			WHERE t.key = $1 AND u.id = t.user_id AND u.is_active AND u.clinic_id IS NOT NULL AND NOT u.must_change_password
 			  AND u.last_activity > now() - make_interval(mins => $2)
 			RETURNING u.id, u.clinic_id, u.role`, key, idleMinutes).Scan(&s.user, &s.clinic, &s.role)
 		if err != nil {
@@ -213,7 +223,7 @@ func (a *App) listPayments(c *fiber.Ctx) error {
 	if err != nil {
 		return fail(c, 404, "Paciente no encontrado")
 	}
-	rows, err := a.db.Query(c.Context(), `SELECT id, amount_cents, method, invoice_number, created_at FROM payments
+	rows, err := a.db.Query(c.Context(), `SELECT id, amount_cents, method, invoice_number, authorization_code, created_at FROM payments
 		WHERE clinic_id = $1 AND patient_id = $2 ORDER BY created_at DESC`, sess(c).clinic, pid)
 	if err != nil {
 		return err
@@ -223,7 +233,7 @@ func (a *App) listPayments(c *fiber.Ctx) error {
 	for rows.Next() {
 		var p Payment
 		var cents int64
-		if err := rows.Scan(&p.ID, &cents, &p.Method, &p.Invoice, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &cents, &p.Method, &p.Invoice, &p.Auth, &p.CreatedAt); err != nil {
 			return err
 		}
 		p.Amount = float64(cents) / 100
@@ -280,8 +290,13 @@ func (a *App) createPayment(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if in.Method == "tarjeta" { // dentro de la transacción: si la pasarela rechaza, el cobro no queda registrado
+		if p.Auth, err = authorizeCard(cents, clinic); err != nil {
+			return fail(c, 402, "La pasarela rechazó la tarjeta: "+err.Error())
+		}
+	}
 	p.Invoice = issueInvoice(p, clinic)
-	if _, err := tx.Exec(ctx, `UPDATE payments SET invoice_number = $1 WHERE id = $2`, p.Invoice, p.ID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE payments SET invoice_number = $1, authorization_code = $2 WHERE id = $3`, p.Invoice, p.Auth, p.ID); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {

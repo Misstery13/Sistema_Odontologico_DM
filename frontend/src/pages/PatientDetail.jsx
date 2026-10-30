@@ -295,7 +295,7 @@ function Payments({ patientId, rev }) {
               <span className="text-pen"><span className="text-pencil">{new Date(p.created_at).toLocaleDateString("es-EC")}</span> · {p.method}</span>
               <span className="font-medium text-pen">{money(p.amount)}</span>
             </div>
-            <p className="text-xs text-pencil">Comprobante {p.invoice_number || "—"}</p>
+            <p className="text-xs text-pencil">Comprobante {p.invoice_number || "—"}{p.authorization && ` · autorización ${p.authorization}`}</p>
           </li>
         ))}
         {!items.length && <li className="py-2 text-sm text-pencil">Sin pagos registrados.</li>}

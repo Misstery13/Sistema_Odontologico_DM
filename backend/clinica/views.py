@@ -4,7 +4,9 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.contrib.auth import authenticate
+from django.contrib.auth.password_validation import validate_password
 from django.core import signing
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import connection, transaction
 from django.db.models import Count, F, Q, Sum
 from django.utils import timezone
@@ -36,6 +38,7 @@ from .serializers import (
     PatientSerializer,
     ToothSerializer,
     TreatmentSerializer,
+    UserSerializer,
     BudgetItemSerializer,
     BudgetSerializer,
     CommissionRuleSerializer,
@@ -439,6 +442,68 @@ def reports(request):
 reports.cls.resource = "reports"
 
 
+class UserViewSet(TenantViewSet):
+    """Administrador TI: alta, rol, activación, contraseña temporal y reinicio de MFA de los usuarios de su clínica."""
+
+    model = User
+    resource = "users"
+    serializer_class = UserSerializer
+    http_method_names = ["get", "post", "patch", "head", "options"]  # sin borrar: los registros clínicos referencian al autor
+
+    def get_queryset(self):
+        return super().get_queryset().order_by("-is_active", "role", "last_name", "username")
+
+    def perform_create(self, serializer):
+        user = serializer.save()
+        audit(self.request, "create", "User", user.pk)
+
+    def perform_update(self, serializer):
+        user = serializer.save()
+        if not user.is_active:
+            Token.objects.filter(user=user).delete()  # cierra su sesión de inmediato
+        audit(self.request, "update", "User", user.pk)
+
+    @action(detail=True, methods=["post"], url_path="reset-password")
+    def reset_password(self, request, pk=None):
+        user = self.get_object()
+        s = UserSerializer(user, data={"password": request.data.get("password", "")}, partial=True, context={"request": request})
+        s.is_valid(raise_exception=True)
+        user.set_password(s.validated_data["password"])
+        user.must_change_password = True
+        user.save(update_fields=["password", "must_change_password"])
+        Token.objects.filter(user=user).delete()
+        audit(request, "update", "User", user.pk)
+        return Response(UserSerializer(user, context={"request": request}).data)
+
+    @action(detail=True, methods=["post"], url_path="reset-mfa")
+    def reset_mfa(self, request, pk=None):
+        user = self.get_object()
+        user.mfa_secret, user.mfa_enabled, user.mfa_last_step = "", False, 0
+        user.save(update_fields=["mfa_secret", "mfa_enabled", "mfa_last_step"])
+        Token.objects.filter(user=user).delete()
+        audit(request, "update", "User", user.pk)
+        return Response(UserSerializer(user, context={"request": request}).data)
+
+
+@api_view(["POST"])
+def change_password(request):
+    """Autoservicio (cualquier rol): obligatorio tras una contraseña temporal. Exige la contraseña actual."""
+    user = request.user
+    if not user.check_password(request.data.get("current_password", "")):
+        raise ValidationError({"current_password": "La contraseña actual no es correcta"})  # nosec B105 - mensaje de error
+    new = request.data.get("new_password", "")
+    if new == request.data.get("current_password"):
+        raise ValidationError({"new_password": "La nueva contraseña debe ser distinta"})  # nosec B105 - mensaje de error
+    try:
+        validate_password(new, user)
+    except DjangoValidationError as e:
+        raise ValidationError({"new_password": list(e.messages)})
+    user.set_password(new)
+    user.must_change_password = False
+    user.save(update_fields=["password", "must_change_password"])
+    return Response({"detail": "Contraseña actualizada"})
+
+
 class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
     resource = "audit"
     permission_classes = [RolePermission]
@@ -456,10 +521,11 @@ MFA_TICKET_SECONDS = 300
 def start_session(user):
     Token.objects.filter(user=user).delete()  # sesión nueva en cada ingreso
     token = Token.objects.create(user=user)
-    User.objects.filter(pk=user.pk).update(last_activity=timezone.now())
-    return Response(
-        {"token": token.key, "id": user.pk, "user": user.get_full_name() or user.username, "role": user.role, "clinic": user.clinic.name}
-    )
+    User.objects.filter(pk=user.pk).update(last_activity=timezone.now(), last_login=timezone.now())
+    return Response({
+        "token": token.key, "id": user.pk, "user": user.get_full_name() or user.username, "role": user.role,
+        "clinic": user.clinic.name, "must_change_password": user.must_change_password,
+    })
 
 
 @api_view(["POST"])

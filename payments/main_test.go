@@ -53,8 +53,8 @@ func newClinic(t *testing.T, a *App) fixture {
 	fx.clinic = exec(t, a, `INSERT INTO clinica_clinic (name) VALUES ($1) RETURNING id`, "Test "+n)
 	for _, role := range []string{"recepcion", "odontologo", "auditor"} {
 		uid := exec(t, a, `INSERT INTO clinica_user (password, is_superuser, username, first_name, last_name, email, is_staff,
-			is_active, date_joined, clinic_id, role, last_activity, mfa_secret, mfa_enabled, mfa_last_step)
-			VALUES ('!', false, $1, $2, 'Test', '', false, true, now(), $3, $2, now(), '', true, 0)
+			is_active, date_joined, clinic_id, role, last_activity, mfa_secret, mfa_enabled, mfa_last_step, must_change_password)
+			VALUES ('!', false, $1, $2, 'Test', '', false, true, now(), $3, $2, now(), '', true, 0, false)
 			RETURNING id`, role+n, role, fx.clinic)
 		key := fmt.Sprintf("%040x", seq.Add(1)*7919+time.Now().UnixNano())[:40]
 		exec(t, a, `INSERT INTO authtoken_token (key, created, user_id) VALUES ($1, now(), $2) RETURNING user_id`, key, uid)
@@ -158,6 +158,15 @@ func TestPaymentValidationAndInvoice(t *testing.T) {
 	s, b := call(t, f, "POST", "/pay/payments", tok, map[string]any{"patient_id": fx.patient, "amount": 40, "method": "tarjeta"})
 	if s != 201 || !strings.HasPrefix(b.(map[string]any)["invoice_number"].(string), "001-001-") {
 		t.Fatalf("cobro: %d %v", s, b)
+	}
+	if !strings.HasPrefix(b.(map[string]any)["authorization"].(string), "SIM-") {
+		t.Errorf("tarjeta sin código de autorización: %v", b)
+	}
+	// pasarela que rechaza: el cobro no se registra
+	authorizeCard = func(int64, int64) (string, error) { return "", fmt.Errorf("fondos insuficientes") }
+	defer func() { authorizeCard = func(int64, int64) (string, error) { return "SIM-000000", nil } }()
+	if s, _ := call(t, f, "POST", "/pay/payments", tok, map[string]any{"patient_id": fx.patient, "amount": 10, "method": "tarjeta"}); s != 402 {
+		t.Errorf("tarjeta rechazada: %d", s)
 	}
 	if _, list := call(t, f, "GET", fmt.Sprintf("/pay/patients/%d/payments", fx.patient), tok, nil); len(list.([]any)) != 1 {
 		t.Errorf("lista de pagos: %v", list)

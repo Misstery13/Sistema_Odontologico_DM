@@ -50,6 +50,7 @@ class User(AbstractUser):
     mfa_secret = models.CharField(max_length=64, blank=True)
     mfa_enabled = models.BooleanField(default=False)
     mfa_last_step = models.BigIntegerField(default=0)  # impide reutilizar un código ya usado
+    must_change_password = models.BooleanField(default=False)  # contraseña temporal asignada por el administrador
 
 
 class Chair(models.Model):

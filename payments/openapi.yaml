@@ -30,6 +30,7 @@ components:
         amount: { type: number, example: 40.5 }
         method: { type: string, enum: [efectivo, tarjeta, transferencia, seguro] }
         invoice_number: { type: string, example: "001-001-000000123" }
+        authorization: { type: string, example: "SIM-482913", description: Código de la pasarela (solo tarjeta) }
         created_at: { type: string, format: date-time }
     Closing:
       type: object
@@ -106,6 +107,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "402": { description: La pasarela rechazó la tarjeta, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "422": { description: El monto excede el saldo pendiente, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /cash-closings:
     post:

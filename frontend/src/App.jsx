@@ -9,6 +9,8 @@ import Cash from "./pages/Cash.jsx";
 import Audit from "./pages/Audit.jsx";
 import Inventory from "./pages/Inventory.jsx";
 import Reports from "./pages/Reports.jsx";
+import Users from "./pages/Users.jsx";
+import Account from "./pages/Account.jsx";
 
 const IDLE_MS = 15 * 60 * 1000; // RNF-05: el backend también invalida el token
 const AuthContext = createContext(null);
@@ -41,6 +43,8 @@ export default function App() {
             <Route path="auditoria" element={<Audit />} />
             <Route path="inventario" element={<Inventory />} />
             <Route path="reportes" element={<Reports />} />
+            <Route path="usuarios" element={<Users />} />
+            <Route path="cuenta" element={<Account />} />
           </Route>
         </Routes>
       </BrowserRouter>
@@ -84,16 +88,17 @@ function Layout() {
             {is("asistente", "odontologo", "auditor", "admin") && <NavLink to="/inventario" className={link}>Inventario</NavLink>}
             {is("auditor", "admin") && <NavLink to="/reportes" className={link}>Reportes</NavLink>}
             {is("auditor", "admin") && <NavLink to="/auditoria" className={link}>Auditoría</NavLink>}
+            {is("admin") && <NavLink to="/usuarios" className={link}>Usuarios</NavLink>}
           </nav>
           <div className="ml-auto flex items-baseline gap-4">
             <span className="label hidden sm:inline">{session.clinic} · {ROLE_LABEL[session.role]}</span>
-            <span className="hand text-lg">{session.user}</span>
+            <NavLink to="/cuenta" className="hand text-lg hover:underline" title="Mi cuenta: cambiar contraseña">{session.user}</NavLink>
             <button onClick={() => logout()} className="link">Salir</button>
           </div>
         </div>
       </header>
       <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
-        <Outlet />
+        {session.must_change_password ? <Account /> : <Outlet />}
       </main>
     </div>
   );

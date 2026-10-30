@@ -25,9 +25,9 @@ Dar de alta la clínica y sus usuarios (la contraseña se pide por teclado; mín
 P="docker compose -f docker-compose.yml -f docker-compose.prod.yml exec backend python manage.py"
 $P nueva_clinica "Clínica Sonrisa" --sillones 3     # sillones, catálogo de procedimientos, insumos, formatos de consentimiento
 $P usuario "Clínica Sonrisa" admin.ti admin --nombre Ana --apellido Ruiz
-$P usuario "Clínica Sonrisa" dra.lopez odontologo --nombre Ana --apellido López
-$P usuario "Clínica Sonrisa" recepcion1 recepcion
 ```
+
+Con ese primer administrador, el resto de usuarios se gestiona desde la pantalla **Usuarios**: alta con contraseña temporal (se cambia obligatoriamente en el primer ingreso), cambio de rol, desactivación y reinicio de MFA.
 
 Roles: `admin`, `recepcion`, `odontologo`, `asistente`, `auditor`. El mismo comando `usuario` cambia la contraseña de un usuario existente. El stock inicial se registra desde **Inventario** como movimientos de compra.
 
@@ -90,9 +90,4 @@ docker compose --profile zap run --rm zap zap-baseline.py -t https://odonto.mido
 
 ## Integraciones simuladas
 
-La facturación electrónica (SRI), WhatsApp/SMS y el OTP de consentimientos usan adaptadores **simulados**: solo escriben en los logs. Para conectar los proveedores reales hay que reemplazar:
-
-- `issueInvoice` en `payments/main.go` (SRI);
-- `send` en `backend/clinica/notify.py` (Meta Cloud API / Twilio).
-
-Esos son los únicos puntos de integración.
+SRI, pasarela de pagos, WhatsApp/SMS/email, OTP y firma con certificado están simulados; cada uno se conecta reemplazando una sola función. La tabla completa está en el README («Integraciones simuladas»).

@@ -49,20 +49,21 @@ Requisitos en `docs/Documento de Requerimientos de Software - Sistema Odontológ
 | RN-03 | No se agendan dos citas a la vez en el mismo sillón ni con el mismo odontólogo |
 | RNF-05 | RBAC con 5 roles; MFA TOTP obligatorio (enrolamiento con QR); sesión cerrada tras 15 min de inactividad (frontend y backend) |
 | RNF-06 | Log de auditoría inmutable (usuario, acción, registro, timestamp ISO-8601, IP) |
+| Administrador TI | Gestión de usuarios de la clínica: alta con contraseña temporal (cambio obligatorio al entrar), cambio de rol, desactivación (cierra su sesión), reinicio de MFA; todo auditado. Cada usuario cambia su contraseña desde «Mi cuenta» |
 | RNF-01 / RNF-03 | Expediente p95 de 262 ms con 150 usuarios concurrentes, 0 errores (`tests/load.py`) |
 | RNF-07 | Revisado en iPad horizontal y vertical y en laptop 1366×768; el odontograma completo entra en una tablet |
 | 8.2 | OpenAPI 3 en `/api/schema/` (API clínica) y `/pay/openapi.yaml` (caja) |
 
-Pendientes: cifrado en reposo a nivel de aplicación (se delega al disco cifrado), firma con certificado personal (hoy HMAC del servidor), pantalla de gestión de usuarios (hoy por CLI) e integraciones reales (SRI, WhatsApp/SMS, pasarela). Detalle en [docs/seguridad/INFORME.md](docs/seguridad/INFORME.md).
+Pendientes: cifrado en reposo a nivel de aplicación (se delega al disco cifrado) y conectar los proveedores reales de las integraciones simuladas (ver abajo). Detalle en [docs/seguridad/INFORME.md](docs/seguridad/INFORME.md).
 
 ### Fase 4: calidad, seguridad y producción
 
 | Entregable | Dónde |
 |---|---|
-| Pruebas de aceptación (39 criterios, contra el sistema desplegado) | `python tests/uat.py [url]` |
+| Pruebas de aceptación (45 criterios, contra el sistema desplegado) | `python tests/uat.py [url]` |
 | Prueba de carga (150 usuarios concurrentes) | `python tests/load.py [url] [usuarios] [segundos]` |
-| Tests Django (24 tests, cobertura 89 %) | `cd backend && coverage run manage.py test` |
-| Tests de integración Go (cobertura 84,1 %) | `sh scripts/test-payments.sh` (con el stack levantado) |
+| Tests Django (27 tests, cobertura 89 %) | `cd backend && coverage run manage.py test` |
+| Tests de integración Go (cobertura 84,7 %) | `sh scripts/test-payments.sh` (con el stack levantado) |
 | SAST, auditoría de dependencias y DAST (OWASP ZAP) | CI y `docker compose --profile zap run --rm zap`; informe en [docs/seguridad/INFORME.md](docs/seguridad/INFORME.md) |
 | CI en cada push (tests, cobertura ≥ 80 %, auditorías) | `.github/workflows/ci.yml` |
 | Producción: TLS 1.3, HSTS, secretos obligatorios, healthchecks, backups diarios | `docker-compose.prod.yml`, `frontend/Caddyfile.prod`, [docs/DESPLIEGUE.md](docs/DESPLIEGUE.md) |
@@ -75,8 +76,20 @@ Pendientes: cifrado en reposo a nivel de aplicación (se delega al disco cifrado
 | `asistente` | Asistente dental | Agenda, pacientes, SOEP, consentimientos, inventario y kardex (lectura de perio, recetas y presupuestos) |
 | `recepcion` | Recepcionista / cajero | Agenda, pacientes, aprobación de presupuestos, cobros, cierre de caja |
 | `auditor` | Auditor / contador | Reportes, honorarios, inventario, cierres de caja, auditoría |
-| `admin` | Administrador TI | Reportes, inventario, cierres de caja, auditoría (sin datos clínicos) |
+| `admin` | Administrador TI | Usuarios (alta, rol, desactivar, contraseña temporal, reinicio de MFA), reportes, inventario, cierres de caja, auditoría (sin datos clínicos) |
 | `dr.vega`, `recepcion.norte` | Dental Norte | Otra clínica: sirve para comprobar el aislamiento |
+
+## Integraciones simuladas
+
+Las integraciones que necesitan cuentas o certificados reales funcionan con **adaptadores simulados**: el flujo completo corre, pero en vez de llamar al proveedor se escribe en el log. Para conectar un proveedor real se reemplaza una sola función, sin tocar el resto del sistema.
+
+| Integración | Qué hace hoy | Dónde se ve | Función a reemplazar |
+|---|---|---|---|
+| Facturación electrónica (SRI) | Numera el comprobante `001-001-NNNNNNNNN` | `docker compose logs payments` | `issueInvoice` en `payments/main.go` |
+| Pasarela de pagos (tarjeta) | Aprueba y devuelve un código `SIM-NNNNNN`; si la pasarela rechaza, el cobro no se registra | `docker compose logs payments` | `authorizeCard` en `payments/main.go` |
+| WhatsApp / SMS / email | Confirmación de cita y recordatorios de 48 h y 24 h | `docker compose logs reminders backend` | `send` en `backend/clinica/notify.py` |
+| OTP del consentimiento | Envía el código de 6 dígitos por el mismo canal | `docker compose logs backend` | `send` en `backend/clinica/notify.py` |
+| Firma digital del profesional | HMAC-SHA256 del servidor sobre el contenido del registro | campo `signature` | `sign` en `backend/clinica/models.py` (certificado personal / PKI) |
 
 ## Seguridad (OWASP)
 
@@ -91,7 +104,7 @@ Pendientes: cifrado en reposo a nivel de aplicación (se delega al disco cifrado
 ```bash
 cd backend && python -m venv .venv && .venv/Scripts/pip install -r requirements.txt
 .venv/Scripts/python manage.py migrate && .venv/Scripts/python manage.py seed
-.venv/Scripts/python manage.py test        # 24 tests de reglas de negocio, RBAC, MFA y aislamiento
+.venv/Scripts/python manage.py test        # 27 tests de reglas de negocio, RBAC, MFA, usuarios y aislamiento
 .venv/Scripts/python manage.py runserver
 cd frontend && npm install && npm run dev  # proxy a :8000 (Django) y :8081 (Go)
 ```

@@ -314,3 +314,53 @@ class MfaTests(APITestCase):
     def test_forged_ticket_rejected(self):
         r = self.client.post("/api/login/mfa/", {"ticket": "falso", "code": "123456"})
         self.assertEqual(r.status_code, 400)
+
+
+class UserManagementTests(APITestCase):
+    """Administrador TI: gestión de usuarios de su clínica."""
+
+    def setUp(self):
+        a, b = Clinic.objects.create(name="A"), Clinic.objects.create(name="B")
+        self.admin = User.objects.create_user("adm", password="x", clinic=a, role="admin")
+        self.other_admin = User.objects.create_user("admb", password="x", clinic=b, role="admin")
+        self.dentist = User.objects.create_user("den", password="x", clinic=a, role="odontologo")
+
+    def auth(self, user):
+        self.client.credentials(HTTP_AUTHORIZATION="Token " + Token.objects.get_or_create(user=user)[0].key)
+
+    def test_only_admin_and_own_clinic(self):
+        self.auth(self.dentist)
+        self.assertEqual(self.client.get("/api/users/").status_code, 403)
+        self.auth(self.other_admin)
+        self.assertEqual([u["username"] for u in self.client.get("/api/users/").json()], ["admb"])
+        self.assertEqual(self.client.patch(f"/api/users/{self.dentist.id}/", {"role": "admin"}).status_code, 404)
+
+    def test_create_with_temporary_password_forces_change(self):
+        self.auth(self.admin)
+        weak = {"username": "nuevo", "role": "recepcion", "password": "123"}
+        self.assertEqual(self.client.post("/api/users/", weak, format="json").status_code, 400)
+        r = self.client.post("/api/users/", {**weak, "password": "Temporal-2026!"}, format="json")
+        self.assertEqual(r.status_code, 201)
+        self.assertNotIn("password", r.json())
+        self.assertTrue(r.json()["must_change_password"])
+        new = User.objects.get(username="nuevo")
+        self.assertEqual(new.clinic, self.admin.clinic)
+        self.auth(new)
+        self.assertEqual(self.client.get("/api/patients/").status_code, 403)  # bloqueado hasta cambiarla
+        self.assertEqual(self.client.post("/api/password/", {"current_password": "mala", "new_password": "Otra-clave-2026"}).status_code, 400)
+        self.assertEqual(self.client.post("/api/password/", {"current_password": "Temporal-2026!", "new_password": "Otra-clave-2026"}).status_code, 200)
+        self.assertEqual(self.client.get("/api/patients/").status_code, 200)
+
+    def test_deactivate_and_resets(self):
+        self.auth(self.admin)
+        self.assertEqual(self.client.patch(f"/api/users/{self.admin.id}/", {"is_active": False}).status_code, 400)  # no a sí mismo
+        Token.objects.create(user=self.dentist)
+        self.assertEqual(self.client.patch(f"/api/users/{self.dentist.id}/", {"is_active": False}).status_code, 200)
+        self.assertFalse(Token.objects.filter(user=self.dentist).exists())  # sesión cerrada
+        self.dentist.mfa_enabled, self.dentist.mfa_secret = True, "ABC"
+        self.dentist.save()
+        r = self.client.post(f"/api/users/{self.dentist.id}/reset-mfa/")
+        self.assertEqual((r.status_code, r.json()["mfa_enabled"]), (200, False))
+        r = self.client.post(f"/api/users/{self.dentist.id}/reset-password/", {"password": "Nueva-temporal-9"})
+        self.assertEqual((r.status_code, r.json()["must_change_password"]), (200, True))
+        self.assertTrue(AuditLog.objects.filter(model="User", object_id=str(self.dentist.id)).exists())

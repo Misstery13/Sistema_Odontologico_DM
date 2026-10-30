@@ -1,13 +1,15 @@
 from datetime import timedelta
 
 from django.conf import settings
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Q
 from rest_framework import serializers
 
 from .models import (
     FDI_TEETH, SURFACE_STATES, SURFACES, Appointment, AuditLog, Chair, ClinicalNote, Consent, ConsentTemplate,
     Patient, PerioExam, Prescription, Tooth, Treatment, Budget, BudgetItem, CommissionRule, Procedure, RecipeLine,
-    StockMovement, Supply,
+    StockMovement, Supply, User,
 )
 
 
@@ -163,6 +165,42 @@ class ClinicalNoteSerializer(TenantSerializer):
         if not any(data.get(f, getattr(self.instance, f, "")) for f in ("subjective", "objective", "assessment", "plan")):
             raise serializers.ValidationError("La nota no puede estar vacía")
         return data
+
+
+class UserSerializer(serializers.ModelSerializer):
+    """Gestión de usuarios de la clínica (rol admin). La contraseña solo se escribe."""
+
+    password = serializers.CharField(write_only=True, required=False, style={"input_type": "password"})
+
+    class Meta:
+        model = User
+        fields = ["id", "username", "first_name", "last_name", "email", "role", "is_active", "mfa_enabled",
+                  "must_change_password", "last_login", "last_activity", "password"]
+        read_only_fields = ["mfa_enabled", "must_change_password", "last_login", "last_activity"]
+
+    def validate(self, data):
+        request = self.context["request"]
+        if self.instance is None and not data.get("password"):
+            raise serializers.ValidationError({"password": "Asigna una contraseña temporal"})  # nosec B105 - mensaje de error, no credencial
+        if "password" in data:
+            try:
+                validate_password(data["password"], User(username=data.get("username", getattr(self.instance, "username", ""))))
+            except DjangoValidationError as e:
+                raise serializers.ValidationError({"password": list(e.messages)})
+        if self.instance == request.user and (data.get("is_active") is False or data.get("role", "admin") != "admin"):
+            raise serializers.ValidationError("No puedes desactivarte ni quitarte el rol de administrador")
+        return data
+
+    def create(self, data):
+        password = data.pop("password")
+        user = User(**data, clinic_id=self.context["request"].tenant, must_change_password=True)
+        user.set_password(password)
+        user.save()
+        return user
+
+    def update(self, instance, data):
+        data.pop("password", None)  # se cambia con la acción reset_password
+        return super().update(instance, data)
 
 
 class AuditLogSerializer(serializers.ModelSerializer):

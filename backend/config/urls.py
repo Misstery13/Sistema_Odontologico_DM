@@ -21,10 +21,12 @@ router.register("supplies", views.SupplyViewSet, basename="supply")
 router.register("stock-movements", views.StockMovementViewSet, basename="stock-movement")
 router.register("budgets", views.BudgetViewSet, basename="budget")
 router.register("commission-rules", views.CommissionRuleViewSet, basename="commission-rule")
+router.register("users", views.UserViewSet, basename="user")
 
 urlpatterns = [
     path("api/login/", views.login),
     path("api/login/mfa/", views.login_mfa),
+    path("api/password/", views.change_password),
     path("api/health/", views.health),
     path("api/dentists/", views.dentists),
     path("api/reports/", views.reports),

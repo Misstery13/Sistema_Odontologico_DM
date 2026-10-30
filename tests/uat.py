@@ -149,6 +149,21 @@ def main():
     check("RF-06", "consentimiento firmado en pantalla", s == 200 and c2["signed"], c2)
     check("RF-06", "no se firma dos veces", call("POST", f"/api/consents/{c['id']}/sign/", D, {"method": "biometrica", "signer_name": "x", "signature_image": "data:image/png;base64," + "A" * 500})[0] == 400)
 
+    # --- Administrador TI: ciclo de vida de un usuario ---
+    new_user = f"uat{tag}"
+    s, u, _ = call("POST", "/api/users/", AD, {"username": new_user, "role": "recepcion", "password": f"Temporal-{tag}!", "is_active": True})
+    check("Usuarios", "el administrador crea un usuario con contraseña temporal", s == 201 and u["must_change_password"], u)
+    check("Usuarios", "solo el administrador gestiona usuarios", call("GET", "/api/users/", R)[0] == 403)
+    s, step, _ = call("POST", "/api/login/", body={"username": new_user, "password": f"Temporal-{tag}!"})
+    check("RNF-05", "primer ingreso exige enrolar MFA (QR)", s == 200 and step.get("mfa") == "setup" and step["qr"].startswith("data:image/svg"), step)
+    s, sess, _ = call("POST", "/api/login/mfa/", body={"ticket": step["ticket"], "code": totp(step["secret"])})
+    NU = sess.get("token") if isinstance(sess, dict) else None
+    check("Usuarios", "con contraseña temporal no accede a datos", NU and call("GET", "/api/patients/", NU)[0] == 403)
+    call("POST", "/api/password/", NU, {"current_password": f"Temporal-{tag}!", "new_password": f"Definitiva-{tag}?"})
+    check("Usuarios", "tras cambiarla accede según su rol", call("GET", "/api/patients/", NU)[0] == 200)
+    call("PATCH", f"/api/users/{u['id']}/", AD, {"is_active": False})
+    check("Usuarios", "desactivarlo cierra su sesión", call("GET", "/api/patients/", NU)[0] == 401)
+
     # --- RF-13, reportes, RNF-06 ---
     today = date.today().isoformat()
     s, rep, _ = call("GET", f"/api/reports/?from={today}&to={today}", AU)
