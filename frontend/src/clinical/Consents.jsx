@@ -84,7 +84,7 @@ function ConsentDocument({ c, patient }) {
           <p className="mt-6 font-semibold text-red">Pendiente de firma</p>
         )}
       </div>
-      <button onClick={() => printElement(ref.current)} className="link mt-2">Imprimir</button>
+      <button onClick={() => api(`/api/consents/${c.id}/export/`).then(() => printElement(ref.current))} className="link mt-2">Imprimir</button>
     </div>
   );
 }
@@ -153,7 +153,7 @@ export default function Consents({ patient }) {
   const load = () => api(`/api/consents/?patient=${patient.id}`).then(setList);
   useEffect(() => {
     load();
-    api("/api/consent-templates/").then(setTemplates);
+    api("/api/consent-templates/").then((l) => setTemplates(l.filter((t) => t.active)));
   }, [patient.id]);
 
   const create = async (e) => {

@@ -22,6 +22,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-odonto}
       SECRET_KEY: ${SECRET_KEY:-cambiar-en-produccion}
       DEBUG: "0"
+    volumes:
+      - media:/app/media # archivos del expediente (radiografías, fotos, PDF)
     depends_on:
       db:
         condition: service_healthy
@@ -52,7 +54,7 @@ services:
   caddy:
     build: ./frontend
     ports:
-      - "8080:80"
+      - "${HTTP_PORT:-8080}:80" # puerto del host; cambiarlo en .env si 8080 está ocupado
     depends_on:
       - backend
       - payments
@@ -71,3 +73,4 @@ services:
 
 volumes:
   pgdata:
+  media:

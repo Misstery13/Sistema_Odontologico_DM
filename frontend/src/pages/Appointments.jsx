@@ -57,7 +57,7 @@ export default function Appointments() {
       if (list.length) setPatient(String(list[0].id));
     });
     api("/api/dentists/").then(setDentists);
-    api("/api/chairs/").then(setChairs);
+    api("/api/chairs/").then((l) => setChairs(l.filter((c) => c.active)));
   }, []);
 
   const submit = formSubmit(async (data) => {
@@ -107,7 +107,7 @@ export default function Appointments() {
           </div>
         </div>
         <div className="flex flex-wrap gap-4 border-b border-print px-5 py-3">
-          <label className="w-44"><span className="label">Sillón</span>
+          <label className="w-44"><span className="label">Consultorio</span>
             <select className="field" value={filters.chair} onChange={(e) => setFilters({ ...filters, chair: e.target.value })}>
               <option value="">Todos</option>
               {chairs.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
@@ -129,7 +129,7 @@ export default function Appointments() {
                 <tr className="border-b border-print">
                   <th className="label w-24 px-5 py-2">Hora</th>
                   <th className="label px-3 py-2">Paciente</th>
-                  <th className="label px-3 py-2">Odontólogo · sillón</th>
+                  <th className="label px-3 py-2">Odontólogo · consultorio</th>
                   <th className="label px-3 py-2">Motivo</th>
                   <th className="label px-5 py-2">Estado</th>
                 </tr>
@@ -225,7 +225,7 @@ export default function Appointments() {
               </select>
             </div>
             <div>
-              <label className="label" htmlFor="chair">Sillón</label>
+              <label className="label" htmlFor="chair">Consultorio</label>
               <select id="chair" name="chair" className="field" required>
                 {chairs.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>

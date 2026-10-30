@@ -74,6 +74,10 @@ MAX_DISCOUNT_PCT = int(os.environ.get("MAX_DISCOUNT_PCT", "15"))  # RF-07: descu
 MFA_REQUIRED = os.environ.get("MFA_REQUIRED", "1") == "1"  # RNF-05: segundo factor obligatorio
 MFA_ISSUER = "Odonto DM"
 
+# archivos del expediente: fuera de la raíz web; se sirven solo a través de la API (permisos + auditoría)
+MEDIA_ROOT = os.environ.get("MEDIA_ROOT", str(BASE_DIR / "media"))
+MAX_ATTACHMENT_MB = int(os.environ.get("MAX_ATTACHMENT_MB", "15"))
+
 LOGGING = {
     "version": 1,
     "handlers": {"console": {"class": "logging.StreamHandler"}},

@@ -4,7 +4,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-RUN useradd -m app
+RUN useradd -m app && mkdir -p /app/media && chown app /app/media
 USER app
 EXPOSE 8000
 # los datos demo (usuarios con clave conocida) nunca se cargan en producción

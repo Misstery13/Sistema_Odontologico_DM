@@ -41,6 +41,22 @@ def check(req, name, ok, detail=""):
     print(f"{'OK  ' if ok else 'FALLA'} [{req}] {name}{'' if ok else f' -> {detail}'}")
 
 
+def upload(token, fields, filename, content):
+    """POST multipart/form-data con un archivo (solo biblioteca estándar)."""
+    boundary = f"----uat{random.randint(10**9, 10**10)}"
+    parts = [f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode() for k, v in fields.items()]
+    parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+                 f"Content-Type: application/octet-stream\r\n\r\n".encode() + content + b"\r\n")
+    req = urllib.request.Request(BASE + "/api/attachments/", method="POST", data=b"".join(parts) + f"--{boundary}--\r\n".encode())
+    req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+    req.add_header("Authorization", f"Token {token}")
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"null")
+
+
 def login(user):
     """Contraseña + código TOTP (secreto demo). Si el código del paso actual ya se usó, espera al siguiente."""
     status, data, _ = call("POST", "/api/login/", body={"username": user, "password": PASSWORD})
@@ -122,14 +138,25 @@ def main():
     check("RF-08", "tratamiento desde el ítem aprobado al precio neto", s == 201 and tr["cost"] == "40.50", tr)
     resin_after = next(x for x in call("GET", "/api/supplies/", AS)[1] if x["name"] == "Resina compuesta")["stock"]
     check("RF-14", "descargo automático de insumos", round(float(resin_before) - float(resin_after), 2) == 0.5, (resin_before, resin_after))
+    resin = next(x for x in call("GET", "/api/supplies/", AS)[1] if x["name"] == "Resina compuesta")
+    s, _, _ = call("POST", "/api/stock-movements/transfer/", AS, {"supply": resin["id"], "from_chair": None, "to_chair": chairs[0]["id"], "quantity": 1})
+    inv = call("GET", "/api/supplies/by-location/", AS)[1]
+    row = next(x for x in inv["supplies"] if x["id"] == resin["id"])
+    check("2.2", "traslado de bodega a consultorio", s == 201 and float(row["by_location"].get(str(chairs[0]["id"]), 0)) >= 1, row)
+    check("2.2", "no se traslada más de lo que hay", call("POST", "/api/stock-movements/transfer/", AS, {"supply": resin["id"], "from_chair": None, "to_chair": chairs[0]["id"], "quantity": 99999})[0] == 400)
+    s, tr2, _ = call("POST", "/api/treatments/", D, {"patient": pid, "catalog": catalog["PROF"]["id"], "chair": chairs[0]["id"], "date": date.today().isoformat()})
+    check("2.2", "el procedimiento descarga del consultorio donde se hizo", s == 201 and tr2["chair"] == chairs[0]["id"], tr2)
     check("RN-01", "lo realizado no se borra", call("DELETE", f"/api/treatments/{tr['id']}/", D)[0] == 405)
 
     # --- RF-12, RN-02: caja ---
     bal = call("GET", f"/pay/patients/{pid}/balance", R)[1]["balance"]
-    check("RF-12", "no se cobra más que el saldo", call("POST", "/pay/payments", R, {"patient_id": pid, "amount": bal + 1, "method": "efectivo"})[0] == 422)
-    s, pay, _ = call("POST", "/pay/payments", R, {"patient_id": pid, "amount": 10, "method": "seguro"})
-    check("RF-12", "cobro con comprobante electrónico", s == 201 and pay["invoice_number"].startswith("001-001-"), pay)
-    check("RF-12", "odontólogo no cobra", call("POST", "/pay/payments", D, {"patient_id": pid, "amount": 1, "method": "efectivo"})[0] == 403)
+    check("RF-12", "no se cobra más que el saldo", call("POST", "/pay/payments", R, {"patient_id": pid, "amount": bal + 1, "method": "efectivo", "buyer_id": "0912345678", "buyer_name": "Lucía Prueba"})[0] == 422)
+    s, pay, _ = call("POST", "/pay/payments", R, {"patient_id": pid, "amount": 10, "method": "tarjeta_credito", "buyer_id": "0912345678", "buyer_name": "Lucía Prueba"})
+    check("RF-12", "cobro con tarjeta de crédito: comprobante y autorización de la pasarela", s == 201 and pay["invoice_number"].startswith("001-001-") and pay["authorization"].startswith("SIM-"), pay)
+    check("RF-12", "comprobante exige datos del comprador", call("POST", "/pay/payments", R, {"patient_id": pid, "amount": 1, "method": "efectivo", "buyer_id": "12", "buyer_name": "X"})[0] == 400)
+    s, rec, _ = call("GET", f"/pay/payments/{pay['id']}/receipt", R)
+    check("RF-12", "comprobante imprimible con comprador e IVA 0 %", s == 200 and rec["payment"]["buyer_id"] == "0912345678" and rec["tax"]["iva_rate"] == 0, rec)
+    check("RF-12", "odontólogo no cobra", call("POST", "/pay/payments", D, {"patient_id": pid, "amount": 1, "method": "efectivo", "buyer_id": "0912345678", "buyer_name": "Lucía Prueba"})[0] == 403)
     check("RN-02", "recepción no ve totales de caja", call("GET", "/pay/cash-closings", R)[0] == 403)
     s, closing, _ = call("POST", "/pay/cash-closings", R, {"counted": 0})
     check("RN-02", "cierre ciego (o ya cerrado hoy)", s == 201 and "expected" in closing or s == 409, closing)
@@ -140,6 +167,21 @@ def main():
     check("RF-05", "nota no se borra", call("DELETE", f"/api/notes/{note['id']}/", D)[0] == 405)
     rx = {"patient": pid, "items": [{"drug": "Amoxicilina 500 mg", "dose": "1", "frequency": "8 h", "duration": "7 días"}]}
     check("Recetas", "alerta de alergia cruzada", call("POST", "/api/prescriptions/", D, rx)[0] == 400)
+    rx_ok = call("POST", "/api/prescriptions/", D, {"patient": pid, "items": [{"drug": "Ibuprofeno 400 mg", "dose": "1", "frequency": "8 h", "duration": "3 días"}]})[1]
+    check("RNF-06", "imprimir receta registra exportación", call("GET", f"/api/prescriptions/{rx_ok['id']}/export/", D)[0] == 200)
+
+    # --- signos vitales y archivos del expediente ---
+    s, v, _ = call("POST", "/api/vitals/", AS, {"patient": pid, "systolic": 185, "diastolic": 112, "heart_rate": 88, "spo2": 98})
+    check("Signos vitales", "la asistente registra signos vitales con alerta clínica", s == 201 and v["alerts"] == ["Crisis hipertensiva: diferir tratamiento electivo"], v)
+    check("Signos vitales", "recepción no accede a signos vitales", call("GET", f"/api/vitals/?patient={pid}", R)[0] == 403)
+    png = b"\x89PNG\r\n\x1a\n" + bytes(range(256))
+    s, att = upload(AS, {"patient": str(pid), "kind": "radiografia", "description": "Periapical 36"}, "rx36.png", png)
+    check("Archivos", "radiografía subida al expediente", s == 201 and att.get("content_type") == "image/png" and att.get("size") == len(png), att)
+    s, bad = upload(AS, {"patient": str(pid), "kind": "documento"}, "factura.pdf", b"MZ\x90 no es un PDF")
+    check("Archivos", "se rechaza un archivo cuyo contenido no coincide con su tipo", s == 400, bad)
+    s, body, h = call("GET", f"/api/attachments/{att['id']}/content/?descargar=1", AS)
+    check("Archivos", "descarga íntegra y autenticada", s == 200 and body == png and "attachment" in h.get("Content-Disposition", ""), s)
+    check("Archivos", "sin token no se accede al archivo", call("GET", f"/api/attachments/{att['id']}/content/")[0] == 401)
     perio = {"patient": pid, "teeth": {"16": {"pd": [3, 4, 5, 3, 2, 3], "gm": [1] * 6, "bleeding": [True, False] * 3, "mobility": 1, "furcation": 0}}}
     s, ex, _ = call("POST", "/api/perio/", D, perio)
     check("RF-04", "periodontograma con resumen", s == 201 and ex["summary"]["deep_sites"] == 2, ex.get("summary"))
@@ -148,6 +190,14 @@ def main():
     s, c2, _ = call("POST", f"/api/consents/{c['id']}/sign/", D, {"method": "biometrica", "signer_name": "Lucía", "signature_image": "data:image/png;base64," + "A" * 500})
     check("RF-06", "consentimiento firmado en pantalla", s == 200 and c2["signed"], c2)
     check("RF-06", "no se firma dos veces", call("POST", f"/api/consents/{c['id']}/sign/", D, {"method": "biometrica", "signer_name": "x", "signature_image": "data:image/png;base64," + "A" * 500})[0] == 400)
+
+    # --- Administrador TI: catálogos ---
+    s, newp, _ = call("POST", "/api/procedures/", AD, {"code": f"T{tag}", "name": f"Procedimiento UAT {tag}", "fee": 12, "lab_cost": 0,
+                                                    "recipe": [{"supply": resin["id"], "quantity": "0.2"}]})
+    check("Catálogos", "el administrador crea un procedimiento con receta de consumo", s == 201 and len(newp["recipe"]) == 1, newp)
+    check("Catálogos", "el administrador cambia el precio", call("PATCH", f"/api/procedures/{newp['id']}/", AD, {"fee": "15.00"})[1]["fee"] == "15.00")
+    check("Catálogos", "otros roles no modifican catálogos", call("PATCH", f"/api/procedures/{newp['id']}/", D, {"fee": "1.00"})[0] == 403)
+    check("Catálogos", "los consultorios no se borran (se desactivan)", call("DELETE", f"/api/chairs/{chairs[0]['id']}/", AD)[0] == 405)
 
     # --- Administrador TI: ciclo de vida de un usuario ---
     new_user = f"uat{tag}"
@@ -171,6 +221,8 @@ def main():
     check("Reportes", "ingresos por método", call("GET", f"/pay/reports/income?from={today}&to={today}", AU)[0] == 200)
     logs = call("GET", "/api/audit/", AU)[1]
     check("RNF-06", "auditoría de la ficha consultada", any(l["model"] == "Patient" and l["object_id"] == str(pid) for l in logs))
+    check("RNF-06", "impresiones y descargas quedan como exportación",
+          {("Payment", str(pay["id"])), ("Attachment", str(att["id"])), ("Prescription", str(rx_ok["id"]))} <= {(l["model"], l["object_id"]) for l in logs if l["action"] == "export"})
 
     failed = [r for r in results if not r[2]]
     print(f"\n{len(results) - len(failed)}/{len(results)} criterios de aceptación cumplidos")

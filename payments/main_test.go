@@ -111,7 +111,7 @@ func TestAuthAndRoles(t *testing.T) {
 	if s, b := call(t, f, "GET", path, fx.tokens["recepcion"], nil); s != 200 || b.(map[string]any)["balance"] != 100.0 {
 		t.Errorf("saldo: %d %v", s, b)
 	}
-	if s, _ := call(t, f, "POST", "/pay/payments", fx.tokens["odontologo"], map[string]any{"patient_id": fx.patient, "amount": 1, "method": "efectivo"}); s != 403 {
+	if s, _ := call(t, f, "POST", "/pay/payments", fx.tokens["odontologo"], map[string]any{"patient_id": fx.patient, "amount": 1, "method": "efectivo", "buyer_id": "0912345678", "buyer_name": "P Test"}); s != 403 {
 		t.Errorf("odontólogo cobrando: %d", s)
 	}
 	// sesión inactiva más de 15 min: se rechaza aunque el token exista
@@ -135,7 +135,7 @@ func TestTenantIsolation(t *testing.T) {
 	if s, _ := call(t, f, "GET", fmt.Sprintf("/pay/patients/%d/balance", other.patient), mine.tokens["recepcion"], nil); s != 404 {
 		t.Errorf("saldo de otra clínica: %d", s)
 	}
-	if s, _ := call(t, f, "POST", "/pay/payments", mine.tokens["recepcion"], map[string]any{"patient_id": other.patient, "amount": 1, "method": "efectivo"}); s != 404 {
+	if s, _ := call(t, f, "POST", "/pay/payments", mine.tokens["recepcion"], map[string]any{"patient_id": other.patient, "amount": 1, "method": "efectivo", "buyer_id": "0912345678", "buyer_name": "P Test"}); s != 404 {
 		t.Errorf("cobro a otra clínica: %d", s)
 	}
 }
@@ -145,17 +145,17 @@ func TestPaymentValidationAndInvoice(t *testing.T) {
 	fx := newClinic(t, a)
 	tok := fx.tokens["recepcion"]
 	for _, body := range []map[string]any{
-		{"patient_id": fx.patient, "amount": 0, "method": "efectivo"},
-		{"patient_id": fx.patient, "amount": 5, "method": "bitcoin"},
+		{"patient_id": fx.patient, "amount": 0, "method": "efectivo", "buyer_id": "0912345678", "buyer_name": "P Test"},
+		{"patient_id": fx.patient, "amount": 5, "method": "bitcoin", "buyer_id": "0912345678", "buyer_name": "P Test"},
 	} {
 		if s, _ := call(t, f, "POST", "/pay/payments", tok, body); s != 400 {
 			t.Errorf("%v: %d", body, s)
 		}
 	}
-	if s, _ := call(t, f, "POST", "/pay/payments", tok, map[string]any{"patient_id": fx.patient, "amount": 100.01, "method": "efectivo"}); s != 422 {
+	if s, _ := call(t, f, "POST", "/pay/payments", tok, map[string]any{"patient_id": fx.patient, "amount": 100.01, "method": "efectivo", "buyer_id": "0912345678", "buyer_name": "P Test"}); s != 422 {
 		t.Errorf("sobrepago: %d", s)
 	}
-	s, b := call(t, f, "POST", "/pay/payments", tok, map[string]any{"patient_id": fx.patient, "amount": 40, "method": "tarjeta"})
+	s, b := call(t, f, "POST", "/pay/payments", tok, map[string]any{"patient_id": fx.patient, "amount": 40, "method": "tarjeta_credito", "buyer_id": "0912345678001", "buyer_name": "P Test"})
 	if s != 201 || !strings.HasPrefix(b.(map[string]any)["invoice_number"].(string), "001-001-") {
 		t.Fatalf("cobro: %d %v", s, b)
 	}
@@ -165,11 +165,34 @@ func TestPaymentValidationAndInvoice(t *testing.T) {
 	// pasarela que rechaza: el cobro no se registra
 	authorizeCard = func(int64, int64) (string, error) { return "", fmt.Errorf("fondos insuficientes") }
 	defer func() { authorizeCard = func(int64, int64) (string, error) { return "SIM-000000", nil } }()
-	if s, _ := call(t, f, "POST", "/pay/payments", tok, map[string]any{"patient_id": fx.patient, "amount": 10, "method": "tarjeta"}); s != 402 {
+	if s, _ := call(t, f, "POST", "/pay/payments", tok, map[string]any{"patient_id": fx.patient, "amount": 10, "method": "tarjeta_credito", "buyer_id": "0912345678001", "buyer_name": "P Test"}); s != 402 {
 		t.Errorf("tarjeta rechazada: %d", s)
 	}
 	if _, list := call(t, f, "GET", fmt.Sprintf("/pay/patients/%d/payments", fx.patient), tok, nil); len(list.([]any)) != 1 {
 		t.Errorf("lista de pagos: %v", list)
+	}
+	for _, buyer := range []map[string]any{{"buyer_id": "123", "buyer_name": "X"}, {"buyer_id": "0912345678", "buyer_name": " "}, {"buyer_id": "091234567a", "buyer_name": "X"}} {
+		body := map[string]any{"patient_id": fx.patient, "amount": 1, "method": "efectivo"}
+		for k, v := range buyer {
+			body[k] = v
+		}
+		if s, _ := call(t, f, "POST", "/pay/payments", tok, body); s != 400 {
+			t.Errorf("comprador inválido %v: %d", buyer, s)
+		}
+	}
+	id := int64(b.(map[string]any)["id"].(float64))
+	s, r := call(t, f, "GET", fmt.Sprintf("/pay/payments/%d/receipt", id), tok, nil)
+	if s != 200 || r.(map[string]any)["payment"].(map[string]any)["buyer_id"] != "0912345678001" {
+		t.Errorf("comprobante: %d %v", s, r)
+	}
+	var exports int
+	a.db.QueryRow(context.Background(), `SELECT count(*) FROM clinica_auditlog WHERE action = 'export' AND model = 'Payment' AND object_id = $1`, fmt.Sprint(id)).Scan(&exports)
+	if exports != 1 {
+		t.Errorf("impresión del comprobante no auditada: %d", exports)
+	}
+	other := newClinic(t, a)
+	if s, _ := call(t, f, "GET", fmt.Sprintf("/pay/payments/%d/receipt", id), other.tokens["recepcion"], nil); s != 404 {
+		t.Errorf("comprobante de otra clínica: %d", s)
 	}
 }
 
@@ -183,7 +206,7 @@ func TestConcurrentPaymentsNeverExceedBalance(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if s, _ := call(t, f, "POST", "/pay/payments", fx.tokens["recepcion"], map[string]any{"patient_id": fx.patient, "amount": 30, "method": "efectivo"}); s == 201 {
+			if s, _ := call(t, f, "POST", "/pay/payments", fx.tokens["recepcion"], map[string]any{"patient_id": fx.patient, "amount": 30, "method": "efectivo", "buyer_id": "0912345678", "buyer_name": "P Test"}); s == 201 {
 				ok.Add(1)
 			}
 		}()
@@ -199,8 +222,8 @@ func TestBlindCashClosingAndIncome(t *testing.T) {
 	a, f := setup(t)
 	fx := newClinic(t, a)
 	rec, aud := fx.tokens["recepcion"], fx.tokens["auditor"]
-	call(t, f, "POST", "/pay/payments", rec, map[string]any{"patient_id": fx.patient, "amount": 25, "method": "efectivo"})
-	call(t, f, "POST", "/pay/payments", rec, map[string]any{"patient_id": fx.patient, "amount": 15, "method": "tarjeta"})
+	call(t, f, "POST", "/pay/payments", rec, map[string]any{"patient_id": fx.patient, "amount": 25, "method": "efectivo", "buyer_id": "0912345678", "buyer_name": "P Test"})
+	call(t, f, "POST", "/pay/payments", rec, map[string]any{"patient_id": fx.patient, "amount": 15, "method": "tarjeta_credito", "buyer_id": "0912345678001", "buyer_name": "P Test"})
 	if s, _ := call(t, f, "GET", "/pay/cash-closings", rec, nil); s != 403 {
 		t.Errorf("recepción viendo cierres: %d", s)
 	}

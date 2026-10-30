@@ -31,6 +31,8 @@ PERMISSIONS = {
     "commissions": ({"auditor", "admin"}, {"auditor", "admin"}),
     "reports": ({"auditor", "admin"}, set()),
     "users": ({"admin"}, {"admin"}),
+    "vitals": ({"odontologo", "asistente"}, {"odontologo", "asistente"}),
+    "attachments": ({"odontologo", "asistente"}, {"odontologo", "asistente"}),
 }
 
 

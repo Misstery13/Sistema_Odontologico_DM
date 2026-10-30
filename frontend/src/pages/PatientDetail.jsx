@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
-import { api, formSubmit, getSession, is, money } from "../api.js";
+import { api, formSubmit, getSession, is, money, printElement } from "../api.js";
 import PatientForm from "../PatientForm.jsx";
 
 import Odontogram, { pendingFindings } from "../Odontogram.jsx";
 import Budgets from "../clinical/Budgets.jsx";
+import Attachments from "../clinical/Attachments.jsx";
+import Vitals from "../clinical/Vitals.jsx";
 import Consents from "../clinical/Consents.jsx";
 import Perio from "../clinical/Perio.jsx";
 import Prescriptions from "../clinical/Prescriptions.jsx";
@@ -64,7 +66,7 @@ export default function PatientDetail() {
         </div>
         <PatientData patient={patient} onEdit={is("recepcion", "odontologo") ? () => setEditing(true) : null} />
         <Treatments patientId={id} teeth={teeth} planRev={planRev} onChange={() => setRev(rev + 1)} />
-        <Payments patientId={id} rev={rev} />
+        <Payments patient={patient} rev={rev} />
       </article>
       <Odontogram patientId={id} teeth={teeth} setTeeth={setTeeth} />
       {is("odontologo", "asistente", "recepcion") && <ClinicalRecord patient={patient} teeth={teeth} onPlanChange={() => setPlanRev(planRev + 1)} />}
@@ -149,6 +151,8 @@ function Treatments({ patientId, teeth, planRev, onChange }) {
   const [catalog, setCatalog] = useState([]);
   const [planned, setPlanned] = useState([]); // ítems aprobados del presupuesto, aún no realizados
   const [source, setSource] = useState("");
+  const [chairs, setChairs] = useState([]);
+  const [chair, setChair] = useState("");
   const [fresh, setFresh] = useState(null);
   const [error, setError] = useState("");
   const load = () => {
@@ -160,12 +164,16 @@ function Treatments({ patientId, teeth, planRev, onChange }) {
   }, [planRev]);
   useEffect(() => {
     load();
-    if (is("odontologo")) api("/api/procedures/").then((l) => setCatalog(l.filter((p) => p.active)));
+    if (!is("odontologo")) return;
+    api("/api/procedures/").then((l) => setCatalog(l.filter((p) => p.active)));
+    api("/api/chairs/").then((l) => setChairs(l.filter((c) => c.active)));
+    // por defecto, el consultorio de la cita de hoy
+    api(`/api/appointments/?patient=${patientId}&date=${new Date().toLocaleDateString("sv")}`).then((l) => l[0]?.chair && setChair(String(l[0].chair)));
   }, [patientId]);
 
   // origen: "b<id>" ítem del presupuesto, "c<id>" catálogo, "otro" texto libre
   const submit = formSubmit(async (data) => {
-    const body = { patient: patientId, date: data.date, notes: data.notes, tooth: data.tooth || null };
+    const body = { patient: patientId, date: data.date, notes: data.notes, tooth: data.tooth || null, chair: chair ? Number(chair) : null };
     if (source.startsWith("b")) body.budget_item = Number(source.slice(1));
     else if (source.startsWith("c")) body.catalog = Number(source.slice(1));
     else Object.assign(body, { procedure: data.procedure, cost: data.cost });
@@ -236,8 +244,14 @@ function Treatments({ patientId, teeth, planRev, onChange }) {
         </>}
         <label><span className="label">Pieza</span><input name="tooth" type="number" min="11" max="85" className="field" placeholder={selectedPlan?.tooth ? String(selectedPlan.tooth) : "Opcional"} /></label>
         <label><span className="label">Fecha</span><input name="date" type="date" className="field" required defaultValue={new Date().toLocaleDateString("sv")} /></label>
-        <label className="col-span-2"><span className="label">Notas</span><input name="notes" className="field" /></label>
-        {price !== null && <p className="col-span-full text-sm text-pencil">Se cargará {money(price)} al saldo y se descargarán los insumos de la receta estándar.</p>}
+        <label><span className="label">Consultorio</span>
+          <select className="field" value={chair} onChange={(e) => setChair(e.target.value)}>
+            <option value="">Bodega central</option>
+            {chairs.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </label>
+        <label><span className="label">Notas</span><input name="notes" className="field" /></label>
+        {price !== null && <p className="col-span-full text-sm text-pencil">Se cargará {money(price)} al saldo y se descargarán los insumos de la receta estándar del consultorio elegido.</p>}
         {error && <p className="error col-span-full" role="alert">{error}</p>}
         <button className="btn col-span-full">Registrar tratamiento</button>
       </form>}
@@ -245,10 +259,62 @@ function Treatments({ patientId, teeth, planRev, onChange }) {
   );
 }
 
-function Payments({ patientId, rev }) {
+export const METHODS = {
+  efectivo: "Efectivo",
+  tarjeta_credito: "Tarjeta de crédito",
+  tarjeta_debito: "Tarjeta de débito",
+  transferencia: "Transferencia",
+  seguro: "Seguro",
+  tarjeta: "Tarjeta", // registros anteriores a la distinción crédito/débito
+};
+const FINAL_CONSUMER = "9999999999999";
+
+// comprobante imprimible; pedirlo al servicio de caja deja la exportación en la auditoría (RNF-06)
+function Receipt({ id }) {
+  const ref = useRef(null);
+  const [r, setR] = useState(null);
+  useEffect(() => {
+    api(`/pay/payments/${id}/receipt`).then(setR);
+  }, [id]);
+  if (!r) return <p className="text-sm text-pencil">Cargando comprobante…</p>;
+  const p = r.payment;
+  return (
+    <div className="mt-2">
+      <div ref={ref} className="sheet border border-rule px-6 py-5 text-sm">
+        <div className="flex items-baseline justify-between border-b-4 border-red pb-2">
+          <span className="font-bold uppercase tracking-[0.14em] text-red">{r.clinic}</span>
+          <span className="label">Comprobante de venta</span>
+        </div>
+        <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1">
+          <dt className="label">Número</dt><dd className="text-right font-semibold text-pen">{p.invoice_number}</dd>
+          <dt className="label">Fecha</dt><dd className="text-right text-pen">{new Date(p.created_at).toLocaleString("es-EC")}</dd>
+          <dt className="label">Cliente</dt><dd className="text-right text-pen">{p.buyer_name}</dd>
+          <dt className="label">{p.buyer_id === FINAL_CONSUMER ? "Consumidor final" : p.buyer_id.length === 13 ? "RUC" : "Cédula"}</dt><dd className="text-right text-pen">{p.buyer_id}</dd>
+          <dt className="label">Paciente</dt><dd className="text-right text-pen">{r.patient}</dd>
+        </dl>
+        <table className="mt-3 w-full">
+          <tbody>
+            <tr className="border-y border-print"><td className="py-1.5">Servicios odontológicos (abono a tratamientos)</td><td className="py-1.5 text-right">{money(p.amount)}</td></tr>
+            <tr><td className="pt-1.5 text-pencil">Subtotal IVA 0 % ({r.tax.note.toLowerCase()})</td><td className="pt-1.5 text-right">{money(p.amount)}</td></tr>
+            <tr><td className="text-pencil">IVA</td><td className="text-right">{money(0)}</td></tr>
+            <tr className="font-semibold"><td className="pt-1">Total</td><td className="pt-1 text-right">{money(p.amount)}</td></tr>
+          </tbody>
+        </table>
+        <p className="mt-2 text-pencil">Forma de pago: {METHODS[p.method] || p.method}{p.authorization && ` · autorización ${p.authorization}`}</p>
+        <p className="mt-1 text-xs text-pencil">Autorización SRI: simulada (ambiente de pruebas)</p>
+      </div>
+      <button onClick={() => printElement(ref.current)} className="link mt-1">Imprimir</button>
+    </div>
+  );
+}
+
+function Payments({ patient, rev }) {
+  const patientId = patient.id;
   const [items, setItems] = useState([]);
   const [balance, setBalance] = useState(null);
   const [fresh, setFresh] = useState(null);
+  const [open, setOpen] = useState(null);
+  const [finalConsumer, setFinalConsumer] = useState(false);
   const [error, setError] = useState("");
   const load = () => {
     api(`/pay/patients/${patientId}/payments`).then(setItems).catch((e) => setError(e.message));
@@ -256,9 +322,15 @@ function Payments({ patientId, rev }) {
   };
   useEffect(load, [patientId, rev]);
 
+  // por defecto factura al paciente; si es menor, a su tutor
+  const defaultBuyer = patient.is_minor
+    ? { id: patient.guardian_cedula, name: patient.guardian_name }
+    : { id: patient.cedula, name: `${patient.first_name} ${patient.last_name}` };
   const submit = formSubmit(async (data) => {
-    const p = await api("/pay/payments", { method: "POST", body: { ...data, patient_id: Number(patientId), amount: Number(data.amount) } });
+    const buyer = finalConsumer ? { buyer_id: FINAL_CONSUMER, buyer_name: "CONSUMIDOR FINAL" } : { buyer_id: data.buyer_id, buyer_name: data.buyer_name };
+    const p = await api("/pay/payments", { method: "POST", body: { method: data.method, ...buyer, patient_id: Number(patientId), amount: Number(data.amount) } });
     setFresh(p.id);
+    setOpen(p.id);
     load();
   }, setError);
   const paid = items.reduce((s, p) => s + p.amount, 0);
@@ -277,13 +349,23 @@ function Payments({ patientId, rev }) {
           <label><span className="label">Monto $</span><input name="amount" type="number" step="0.01" min="0.01" className="field" required /></label>
           <label><span className="label">Método</span>
             <select name="method" className="field">
-              <option value="efectivo">Efectivo</option>
-              <option value="tarjeta">Tarjeta</option>
-              <option value="transferencia">Transferencia</option>
-              <option value="seguro">Seguro</option>
+              {Object.entries(METHODS).filter(([k]) => k !== "tarjeta").map(([k, v]) => <option key={k} value={k}>{v}</option>)}
             </select>
           </label>
         </div>
+        <fieldset className="space-y-2">
+          <legend className="label">Comprobante a nombre de</legend>
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={finalConsumer} onChange={(e) => setFinalConsumer(e.target.checked)} className="h-4 w-4 accent-pen" />
+            Consumidor final
+          </label>
+          {!finalConsumer && (
+            <div className="grid grid-cols-2 gap-4">
+              <input name="buyer_id" className="field" defaultValue={defaultBuyer.id} placeholder="Cédula o RUC" inputMode="numeric" pattern="\d{10}|\d{13}" required aria-label="Cédula o RUC" />
+              <input name="buyer_name" className="field" defaultValue={defaultBuyer.name} placeholder="Nombre o razón social" required aria-label="Nombre o razón social" />
+            </div>
+          )}
+        </fieldset>
         {error && <p className="error" role="alert">{error}</p>}
         <button className="btn w-full" disabled={!(balance > 0)}>Cobrar y emitir comprobante</button>
       </form>}
@@ -292,10 +374,14 @@ function Payments({ patientId, rev }) {
         {items.map((p) => (
           <li key={p.id} className="rule-row py-1.5">
             <div className={`flex justify-between ${p.id === fresh ? "write-in" : ""}`}>
-              <span className="text-pen"><span className="text-pencil">{new Date(p.created_at).toLocaleDateString("es-EC")}</span> · {p.method}</span>
+              <span className="text-pen"><span className="text-pencil">{new Date(p.created_at).toLocaleDateString("es-EC")}</span> · {METHODS[p.method] || p.method}</span>
               <span className="font-medium text-pen">{money(p.amount)}</span>
             </div>
-            <p className="text-xs text-pencil">Comprobante {p.invoice_number || "—"}{p.authorization && ` · autorización ${p.authorization}`}</p>
+            <p className="flex justify-between text-xs text-pencil">
+              <span>Comprobante {p.invoice_number || "—"}{p.authorization && ` · autorización ${p.authorization}`}</span>
+              {p.buyer_id && <button onClick={() => setOpen(open === p.id ? null : p.id)} className="link text-xs">{open === p.id ? "Ocultar" : "Ver comprobante"}</button>}
+            </p>
+            {open === p.id && <Receipt id={p.id} />}
           </li>
         ))}
         {!items.length && <li className="py-2 text-sm text-pencil">Sin pagos registrados.</li>}
@@ -416,11 +502,13 @@ function Notes({ patientId }) {
 
 // expediente clínico (solo personal clínico): evolución, periodontograma, recetas y consentimientos
 const TABS = {
+  vitales: ["Signos vitales", ["odontologo", "asistente"]],
   soep: ["Evolución SOEP", ["odontologo", "asistente"]],
   perio: ["Periodontograma", ["odontologo", "asistente"]],
   presupuestos: ["Presupuestos", ["odontologo", "asistente", "recepcion"]],
   recetas: ["Recetas", ["odontologo", "asistente"]],
   consentimientos: ["Consentimientos", ["odontologo", "asistente"]],
+  archivos: ["Archivos", ["odontologo", "asistente"]],
 };
 
 function ClinicalRecord({ patient, teeth, onPlanChange }) {
@@ -437,7 +525,9 @@ function ClinicalRecord({ patient, teeth, onPlanChange }) {
         ))}
       </div>
       <div role="tabpanel">
+        {tab === "vitales" && <Vitals patient={patient} />}
         {tab === "soep" && <Notes patientId={patient.id} />}
+        {tab === "archivos" && <Attachments patient={patient} />}
         {tab === "perio" && <Perio patient={patient} teeth={teeth} />}
         {tab === "presupuestos" && <Budgets patient={patient} onChange={onPlanChange} />}
         {tab === "recetas" && <Prescriptions patient={patient} />}

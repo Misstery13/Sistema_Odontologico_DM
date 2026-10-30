@@ -44,7 +44,7 @@ function RxDocument({ rx, patient }) {
           <p className="text-xs text-pencil">Firma digital {rx.signature}</p>
         </div>
       </div>
-      <button onClick={() => printElement(ref.current)} className="link mt-2">Imprimir receta</button>
+      <button onClick={() => api(`/api/prescriptions/${rx.id}/export/`).then(() => printElement(ref.current))} className="link mt-2">Imprimir receta</button>
     </div>
   );
 }

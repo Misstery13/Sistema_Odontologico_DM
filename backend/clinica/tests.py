@@ -364,3 +364,97 @@ class UserManagementTests(APITestCase):
         r = self.client.post(f"/api/users/{self.dentist.id}/reset-password/", {"password": "Nueva-temporal-9"})
         self.assertEqual((r.status_code, r.json()["must_change_password"]), (200, True))
         self.assertTrue(AuditLog.objects.filter(model="User", object_id=str(self.dentist.id)).exists())
+
+
+class ExpedienteTests(APITestCase):
+    """Archivos del expediente, signos vitales, exportaciones auditadas, inventario por ubicación y catálogos."""
+
+    def setUp(self):
+        import tempfile
+        from decimal import Decimal
+        from django.test import override_settings
+        from .models import Procedure, RecipeLine, Supply
+        self.media = override_settings(MEDIA_ROOT=tempfile.mkdtemp())
+        self.media.enable()
+        self.D = Decimal
+        clinic = Clinic.objects.create(name="A")
+        self.dentist = User.objects.create_user("d", password="x", clinic=clinic, role="odontologo")
+        self.assistant = User.objects.create_user("as", password="x", clinic=clinic, role="asistente")
+        self.recep = User.objects.create_user("r", password="x", clinic=clinic, role="recepcion")
+        self.admin = User.objects.create_user("ad", password="x", clinic=clinic, role="admin")
+        self.patient = Patient.objects.create(clinic=clinic, cedula="1", first_name="P", last_name="A")
+        self.chair = Chair.objects.create(clinic=clinic, name="Consultorio 1")
+        self.gloves = Supply.objects.create(clinic=clinic, name="Guantes", unit="par", unit_cost=1)
+        self.proc = Procedure.objects.create(clinic=clinic, code="PROF", name="Profilaxis", fee=25)
+        RecipeLine.objects.create(procedure=self.proc, supply=self.gloves, quantity=2)
+
+    def tearDown(self):
+        self.media.disable()
+
+    def auth(self, user):
+        self.client.credentials(HTTP_AUTHORIZATION="Token " + Token.objects.get_or_create(user=user)[0].key)
+
+    def upload(self, content, name="rx.png"):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        return self.client.post("/api/attachments/", {"patient": self.patient.id, "kind": "radiografia", "description": "Periapical 36",
+                                                      "file": SimpleUploadedFile(name, content, content_type="image/png")}, format="multipart")
+
+    def test_attachments(self):
+        self.auth(self.assistant)
+        png = b"\x89PNG\r\n\x1a\n" + b"0" * 100
+        r = self.upload(png)
+        self.assertEqual(r.status_code, 201, r.content)
+        self.assertEqual((r.json()["content_type"], r.json()["size"]), ("image/png", 108))
+        self.assertNotIn("file", r.json())  # la ruta en disco nunca se expone
+        self.assertEqual(self.upload(b"MZ\x90\x00 ejecutable", "virus.png").status_code, 400)  # la extensión miente
+        aid = r.json()["id"]
+        d = self.client.get(f"/api/attachments/{aid}/content/?descargar=1")
+        self.assertEqual((d.status_code, d["Content-Type"], b"".join(d.streaming_content)), (200, "image/png", png))
+        self.assertTrue(AuditLog.objects.filter(action="export", model="Attachment", object_id=str(aid)).exists())
+        self.assertEqual(self.client.delete(f"/api/attachments/{aid}/").status_code, 405)
+        self.auth(self.recep)
+        self.assertEqual(self.client.get(f"/api/attachments/{aid}/content/").status_code, 403)
+
+    def test_vital_signs(self):
+        self.auth(self.assistant)
+        base = {"patient": self.patient.id, "systolic": 150, "diastolic": 95, "heart_rate": 80, "spo2": 97}
+        r = self.client.post("/api/vitals/", base)
+        self.assertEqual((r.status_code, r.json()["alerts"]), (201, ["Presión elevada"]))
+        self.assertEqual(self.client.post("/api/vitals/", {**base, "diastolic": 160}).status_code, 400)  # diastólica >= sistólica
+        self.assertEqual(self.client.post("/api/vitals/", {**base, "systolic": 400}).status_code, 400)
+        self.auth(self.recep)
+        self.assertEqual(self.client.get("/api/vitals/").status_code, 403)
+
+    def test_inventory_by_location_and_transfer(self):
+        self.auth(self.assistant)
+        self.client.post("/api/stock-movements/", {"supply": self.gloves.id, "quantity": 10, "reason": "compra"})  # a bodega
+        t = lambda q, frm=None, to=None: self.client.post("/api/stock-movements/transfer/", {"supply": self.gloves.id, "from_chair": frm, "to_chair": to, "quantity": q}, format="json")
+        self.assertEqual(t(4, None, self.chair.id).status_code, 201)
+        self.assertEqual(t(20, None, self.chair.id).status_code, 400)  # no alcanza en bodega
+        self.assertEqual(t(1, self.chair.id, self.chair.id).status_code, 400)
+        self.auth(self.dentist)
+        self.client.post("/api/treatments/", {"patient": self.patient.id, "catalog": self.proc.id, "chair": self.chair.id, "date": "2026-10-01"})
+        self.auth(self.assistant)
+        inv = self.client.get("/api/supplies/by-location/").json()
+        gloves = inv["supplies"][0]
+        self.assertEqual((float(gloves["total"]), float(gloves["by_location"]["bodega"]), float(gloves["by_location"][str(self.chair.id)])), (8, 6, 2))
+
+    def test_prescription_export_is_audited(self):
+        self.auth(self.dentist)
+        rx = self.client.post("/api/prescriptions/", {"patient": self.patient.id, "items": [{"drug": "Ibuprofeno", "dose": "1", "frequency": "8h", "duration": "3d"}]}, format="json").json()
+        self.assertEqual(self.client.get(f"/api/prescriptions/{rx['id']}/export/").status_code, 200)
+        self.assertTrue(AuditLog.objects.filter(action="export", model="Prescription", object_id=str(rx["id"])).exists())
+
+    def test_catalogs_deactivate_not_delete(self):
+        from .models import ConsentTemplate
+        self.auth(self.admin)
+        self.assertEqual(self.client.delete(f"/api/chairs/{self.chair.id}/").status_code, 405)
+        self.assertEqual(self.client.patch(f"/api/chairs/{self.chair.id}/", {"active": False}).status_code, 200)
+        tpl = self.client.post("/api/consent-templates/", {"procedure": "Blanqueamiento", "body": "Yo {paciente} autorizo {procedimiento}."}).json()
+        self.client.patch(f"/api/consent-templates/{tpl['id']}/", {"active": False})
+        self.auth(self.dentist)
+        self.assertEqual(self.client.post("/api/consents/", {"patient": self.patient.id, "template": tpl["id"]}).status_code, 400)
+        self.assertEqual(self.client.patch(f"/api/procedures/{self.proc.id}/", {"fee": 30}).status_code, 403)  # solo admin
+        self.auth(self.admin)
+        r = self.client.patch(f"/api/procedures/{self.proc.id}/", {"fee": 30, "recipe": [{"supply": self.gloves.id, "quantity": 3}]}, format="json")
+        self.assertEqual((r.status_code, r.json()["fee"], r.json()["recipe"][0]["quantity"]), (200, "30.00", "3.00"))

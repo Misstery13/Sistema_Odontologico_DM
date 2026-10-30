@@ -136,6 +136,10 @@ export default function Reports() {
             </Card>
             <Card title="Consumo de insumos">
               <Table head={["Insumo", "Consumido"]} rows={data.consumption.map((c) => [c.supply__name, `${Number(c.quantity).toLocaleString("es-EC")} ${c.supply__unit}`])} empty="Sin consumo registrado." />
+              <div className="grid gap-x-6 border-t border-rule sm:grid-cols-2">
+                <Table head={["Consultorio", "Costo"]} rows={data.consumption_by_location.map((c) => [c.location, money(c.cost)])} empty="—" />
+                <Table head={["Profesional", "Costo"]} rows={data.consumption_by_dentist.map((c) => [c.dentist, money(c.cost)])} empty="—" />
+              </div>
               {data.low_stock.length > 0 && (
                 <p className="px-5 py-3 text-sm font-medium text-red">Stock bajo: {data.low_stock.map((s) => s.name).join(", ")}</p>
               )}

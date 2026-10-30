@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
 
-const ACTIONS = { list: "Consulta de lista", read: "Consulta", create: "Alta", update: "Modificación" };
+const ACTIONS = { list: "Consulta de lista", read: "Consulta", create: "Alta", update: "Modificación", export: "Exportación / impresión" };
 const MODELS = {
   Patient: "Paciente", ClinicalNote: "Nota SOEP", Treatment: "Tratamiento", Tooth: "Odontograma", User: "Usuario",
   Budget: "Presupuesto", Consent: "Consentimiento", PerioExam: "Periodontograma", Prescription: "Receta",
+  VitalSigns: "Signos vitales", Attachment: "Archivo", Payment: "Comprobante",
 };
 
 // RNF-06: quién consultó o modificó qué historia clínica, cuándo y desde dónde

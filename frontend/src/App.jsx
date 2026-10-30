@@ -11,6 +11,7 @@ import Inventory from "./pages/Inventory.jsx";
 import Reports from "./pages/Reports.jsx";
 import Users from "./pages/Users.jsx";
 import Account from "./pages/Account.jsx";
+import Catalogs from "./pages/Catalogs.jsx";
 
 const IDLE_MS = 15 * 60 * 1000; // RNF-05: el backend también invalida el token
 const AuthContext = createContext(null);
@@ -44,6 +45,7 @@ export default function App() {
             <Route path="inventario" element={<Inventory />} />
             <Route path="reportes" element={<Reports />} />
             <Route path="usuarios" element={<Users />} />
+            <Route path="catalogos" element={<Catalogs />} />
             <Route path="cuenta" element={<Account />} />
           </Route>
         </Routes>
@@ -89,6 +91,7 @@ function Layout() {
             {is("auditor", "admin") && <NavLink to="/reportes" className={link}>Reportes</NavLink>}
             {is("auditor", "admin") && <NavLink to="/auditoria" className={link}>Auditoría</NavLink>}
             {is("admin") && <NavLink to="/usuarios" className={link}>Usuarios</NavLink>}
+            {is("admin") && <NavLink to="/catalogos" className={link}>Catálogos</NavLink>}
           </nav>
           <div className="ml-auto flex items-baseline gap-4">
             <span className="label hidden sm:inline">{session.clinic} · {ROLE_LABEL[session.role]}</span>

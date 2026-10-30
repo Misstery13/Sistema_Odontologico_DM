@@ -22,6 +22,8 @@ router.register("stock-movements", views.StockMovementViewSet, basename="stock-m
 router.register("budgets", views.BudgetViewSet, basename="budget")
 router.register("commission-rules", views.CommissionRuleViewSet, basename="commission-rule")
 router.register("users", views.UserViewSet, basename="user")
+router.register("vitals", views.VitalSignsViewSet, basename="vitals")
+router.register("attachments", views.AttachmentViewSet, basename="attachment")
 
 urlpatterns = [
     path("api/login/", views.login),

@@ -1,3 +1,5 @@
+import hashlib
+from decimal import Decimal
 from datetime import timedelta
 
 from django.conf import settings
@@ -9,7 +11,7 @@ from rest_framework import serializers
 from .models import (
     FDI_TEETH, SURFACE_STATES, SURFACES, Appointment, AuditLog, Chair, ClinicalNote, Consent, ConsentTemplate,
     Patient, PerioExam, Prescription, Tooth, Treatment, Budget, BudgetItem, CommissionRule, Procedure, RecipeLine,
-    StockMovement, Supply, User,
+    StockMovement, Supply, User, Attachment, VitalSigns,
 )
 
 
@@ -311,7 +313,7 @@ class ConsentTemplateSerializer(TenantSerializer):
 
 
 class ConsentSerializer(TenantSerializer):
-    template = serializers.PrimaryKeyRelatedField(queryset=ConsentTemplate.objects.all(), write_only=True)
+    template = serializers.PrimaryKeyRelatedField(queryset=ConsentTemplate.objects.filter(active=True), write_only=True)
     created_by_name = serializers.StringRelatedField(source="created_by", read_only=True)
     signed = serializers.SerializerMethodField()
 
@@ -386,8 +388,8 @@ class StockMovementSerializer(TenantSerializer):
         read_only_fields = ["user", "created_at", "treatment"]
 
     def validate(self, data):
-        if data["reason"] == "consumo":
-            raise serializers.ValidationError({"reason": "El consumo se descarga solo al registrar procedimientos"})
+        if data["reason"] in ("consumo", "traslado"):
+            raise serializers.ValidationError({"reason": "El consumo se descarga al registrar procedimientos; los traslados tienen su propia acción"})
         if data["quantity"] == 0 or (data["reason"] == "compra" and data["quantity"] < 0):
             raise serializers.ValidationError({"quantity": "Una compra debe ser positiva; un ajuste, distinto de cero"})
         if data["reason"] == "ajuste" and not data.get("note", "").strip():
@@ -459,3 +461,82 @@ class CommissionRuleSerializer(TenantSerializer):
     class Meta:
         model = CommissionRule
         exclude = ["clinic"]
+
+
+def location_stock(supply, chair):
+    """Existencia de un insumo en una ubicación (consultorio; None = bodega central) según el kardex."""
+    from django.db.models import Sum
+    return StockMovement.objects.filter(supply=supply, chair=chair).aggregate(q=Sum("quantity"))["q"] or 0
+
+
+class TransferSerializer(serializers.Serializer):
+    """Traslado de insumos entre bodega central y consultorios."""
+
+    supply = serializers.PrimaryKeyRelatedField(queryset=Supply.objects.all())
+    from_chair = serializers.PrimaryKeyRelatedField(queryset=Chair.objects.all(), allow_null=True)
+    to_chair = serializers.PrimaryKeyRelatedField(queryset=Chair.objects.all(), allow_null=True)
+    quantity = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+
+    def validate(self, data):
+        tenant = self.context["request"].tenant
+        if data["supply"].clinic_id != tenant or any(c and c.clinic_id != tenant for c in (data["from_chair"], data["to_chair"])):
+            raise serializers.ValidationError("Insumo o ubicación inválidos")
+        if data["from_chair"] == data["to_chair"]:
+            raise serializers.ValidationError("El origen y el destino deben ser distintos")
+        return data
+
+
+class VitalSignsSerializer(TenantSerializer):
+    recorded_by_name = serializers.SerializerMethodField()
+    alerts = serializers.ListField(read_only=True)
+
+    class Meta:
+        model = VitalSigns
+        exclude = ["clinic"]
+        read_only_fields = ["recorded_by", "created_at"]
+
+    def get_recorded_by_name(self, obj):
+        return obj.recorded_by.get_full_name() or obj.recorded_by.username
+
+    def validate(self, data):
+        if data["diastolic"] >= data["systolic"]:
+            raise serializers.ValidationError({"diastolic": "La presión diastólica debe ser menor que la sistólica"})
+        return data
+
+
+# tipo real del archivo por su firma (magic bytes); no se confía en la extensión ni en lo que declara el navegador
+MAGIC = {b"\xff\xd8\xff": "image/jpeg", b"\x89PNG\r\n\x1a\n": "image/png", b"%PDF-": "application/pdf"}
+
+
+class AttachmentSerializer(TenantSerializer):
+    file = serializers.FileField(write_only=True)
+    uploaded_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Attachment
+        exclude = ["clinic"]
+        read_only_fields = ["uploaded_by", "created_at", "original_name", "content_type", "size", "sha256"]
+
+    def get_uploaded_by_name(self, obj):
+        return obj.uploaded_by.get_full_name() or obj.uploaded_by.username
+
+    def validate_file(self, f):
+        if f.size > settings.MAX_ATTACHMENT_MB * 1024 * 1024:
+            raise serializers.ValidationError(f"El archivo supera {settings.MAX_ATTACHMENT_MB} MB")
+        head = f.read(8)
+        f.seek(0)
+        kind = next((ct for sig, ct in MAGIC.items() if head.startswith(sig)), None)
+        if not kind:
+            raise serializers.ValidationError("Formato no admitido: sube JPG, PNG o PDF")
+        f.detected_type = kind
+        return f
+
+    def create(self, data):
+        f = data["file"]
+        digest = hashlib.sha256()
+        for chunk in f.chunks():
+            digest.update(chunk)
+        f.seek(0)
+        return Attachment.objects.create(
+            **data, original_name=f.name[:200], content_type=f.detected_type, size=f.size, sha256=digest.hexdigest()
+        )

@@ -8,13 +8,15 @@ from django.contrib.auth.password_validation import validate_password
 from django.core import signing
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import connection, transaction
-from django.db.models import Count, F, Q, Sum
+from django.db.models import Count, DecimalField, ExpressionWrapper, F, Q, Sum
+from django.http import FileResponse
 from django.utils import timezone
 from rest_framework import viewsets
 from rest_framework.authtoken.models import Token
 from rest_framework.decorators import action, api_view, authentication_classes, permission_classes, throttle_classes
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import AllowAny
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 
@@ -23,7 +25,7 @@ from . import mfa
 from .auth import RolePermission
 from .models import (
     Appointment, AuditLog, Chair, ClinicalNote, Consent, ConsentTemplate, Patient, PerioExam, Prescription, Tooth,
-    Treatment, User, sign, Budget, BudgetItem, CommissionRule, Procedure, StockMovement, Supply,
+    Treatment, User, sign, Budget, BudgetItem, CommissionRule, Procedure, StockMovement, Supply, Attachment, VitalSigns,
 )
 from .notify import notify, send
 from .serializers import (
@@ -39,6 +41,10 @@ from .serializers import (
     ToothSerializer,
     TreatmentSerializer,
     UserSerializer,
+    AttachmentSerializer,
+    TransferSerializer,
+    VitalSignsSerializer,
+    location_stock,
     BudgetItemSerializer,
     BudgetSerializer,
     CommissionRuleSerializer,
@@ -126,6 +132,7 @@ class ChairViewSet(TenantViewSet):
     model = Chair
     resource = "chairs"
     serializer_class = ChairSerializer
+    http_method_names = ["get", "post", "patch", "head", "options"]  # se desactivan: las citas y el kardex los referencian
 
 
 class AppointmentViewSet(TenantViewSet):
@@ -156,7 +163,7 @@ def consume_supplies(treatment, user):
     cost = 0
     for line in treatment.catalog.recipe.select_related("supply") if treatment.catalog else []:
         Supply.objects.filter(pk=line.supply_id).update(stock=F("stock") - line.quantity)
-        StockMovement.objects.create(clinic_id=treatment.clinic_id, supply=line.supply, quantity=-line.quantity,
+        StockMovement.objects.create(clinic_id=treatment.clinic_id, supply=line.supply, chair=treatment.chair, quantity=-line.quantity,
                                      reason="consumo", treatment=treatment, user=user)
         cost += line.quantity * line.supply.unit_cost
     return round(cost, 2)
@@ -217,13 +224,23 @@ class AuthoredViewSet(TenantViewSet):
         audit(self.request, "create", self.model.__name__, obj.pk)
 
 
+class ExportMixin:
+    """RNF-06: imprimir o descargar un registro clínico queda en la auditoría como exportación."""
+
+    @action(detail=True, methods=["get"])
+    def export(self, request, pk=None):
+        obj = self.get_object()
+        audit(request, "export", self.model.__name__, obj.pk)
+        return Response(self.get_serializer(obj).data)
+
+
 class PerioExamViewSet(AuthoredViewSet):
     model = PerioExam
     resource = "perio"
     serializer_class = PerioExamSerializer
 
 
-class PrescriptionViewSet(AuthoredViewSet):
+class PrescriptionViewSet(ExportMixin, AuthoredViewSet):
     model = Prescription
     resource = "prescriptions"
     serializer_class = PrescriptionSerializer
@@ -233,13 +250,14 @@ class ConsentTemplateViewSet(TenantViewSet):
     model = ConsentTemplate
     resource = "consent_templates"
     serializer_class = ConsentTemplateSerializer
+    http_method_names = ["get", "post", "patch", "head", "options"]  # lo firmado guarda su copia; editar no lo altera
 
 
 def mask(contact):
     return f"{contact[:3]}…{contact[-2:]}"
 
 
-class ConsentViewSet(TenantViewSet):
+class ConsentViewSet(ExportMixin, TenantViewSet):
     """RF-06: el formato se copia completado al crearlo y se firma una vez (pantalla táctil u OTP)."""
 
     model = Consent
@@ -326,6 +344,23 @@ class SupplyViewSet(TenantViewSet):
     serializer_class = SupplySerializer
     http_method_names = ["get", "post", "patch", "head", "options"]
 
+    @action(detail=False, url_path="by-location")
+    def by_location(self, request):
+        """Existencias por ubicación: bodega central y cada consultorio (objetivo 2.2)."""
+        rows = (StockMovement.objects.filter(clinic_id=request.tenant).values("supply_id", "chair_id").annotate(q=Sum("quantity")))
+        stock = {}
+        for r in rows:
+            stock.setdefault(r["supply_id"], {})[str(r["chair_id"] or "bodega")] = r["q"]
+        chairs = Chair.objects.filter(clinic_id=request.tenant, active=True)
+        return Response({
+            "locations": [{"id": "bodega", "name": "Bodega central"}] + [{"id": str(c.pk), "name": c.name} for c in chairs],
+            "supplies": [
+                {"id": s.pk, "name": s.name, "unit": s.unit, "min_stock": s.min_stock, "total": s.stock, "low": s.stock <= s.min_stock,
+                 "by_location": stock.get(s.pk, {})}
+                for s in Supply.objects.filter(clinic_id=request.tenant)
+            ],
+        })
+
 
 class StockMovementViewSet(TenantViewSet):
     model = StockMovement
@@ -334,14 +369,34 @@ class StockMovementViewSet(TenantViewSet):
     http_method_names = ["get", "post", "head", "options"]
 
     def get_queryset(self):
-        qs = super().get_queryset().select_related("supply", "user")
+        qs = super().get_queryset().select_related("supply", "user", "chair")
         supply = self.request.query_params.get("supply")
         return (qs.filter(supply_id=supply) if supply else qs)[:200]
 
     @transaction.atomic
     def perform_create(self, serializer):
+        supply = Supply.objects.select_for_update().get(pk=serializer.validated_data["supply"].pk)
+        chair, qty = serializer.validated_data.get("chair"), serializer.validated_data["quantity"]
+        if qty < 0 and location_stock(supply, chair) + qty < 0:
+            raise ValidationError({"quantity": "No hay suficiente existencia en esa ubicación"})
         m = serializer.save(clinic_id=self.request.tenant, user=self.request.user)
         Supply.objects.filter(pk=m.supply_id).update(stock=F("stock") + m.quantity)
+
+    @action(detail=False, methods=["post"])
+    @transaction.atomic
+    def transfer(self, request):
+        s = TransferSerializer(data=request.data, context={"request": request})
+        s.is_valid(raise_exception=True)
+        d = s.validated_data
+        supply = Supply.objects.select_for_update().get(pk=d["supply"].pk)  # serializa traslados del mismo insumo
+        if location_stock(supply, d["from_chair"]) < d["quantity"]:
+            raise ValidationError({"quantity": "No hay suficiente existencia en el origen"})
+        name = lambda c: c.name if c else "Bodega central"
+        note = f"{name(d['from_chair'])} → {name(d['to_chair'])}"
+        for chair, qty in ((d["from_chair"], -d["quantity"]), (d["to_chair"], d["quantity"])):
+            StockMovement.objects.create(clinic_id=request.tenant, supply=supply, chair=chair, quantity=qty,
+                                         reason="traslado", user=request.user, note=note)
+        return Response({"detail": f"Trasladado: {note}"}, status=201)
 
 
 class BudgetViewSet(TenantViewSet):
@@ -425,8 +480,14 @@ def reports(request):
     appts = Appointment.objects.filter(clinic_id=tenant, start__date__gte=start, start__date__lte=end)
     by_status = dict(appts.values_list("status").annotate(n=Count("id")))
     attended = by_status.get("atendido", 0) + by_status.get("no_asistio", 0)
-    consumption = (StockMovement.objects.filter(clinic_id=tenant, reason="consumo", created_at__date__gte=start, created_at__date__lte=end)
-                   .values("supply__name", "supply__unit").annotate(quantity=-Sum("quantity")).order_by("-quantity"))
+    used = StockMovement.objects.filter(clinic_id=tenant, reason="consumo", created_at__date__gte=start, created_at__date__lte=end)
+    cost = Sum(ExpressionWrapper(-F("quantity") * F("supply__unit_cost"), output_field=DecimalField(max_digits=14, decimal_places=4)))
+    consumption = used.values("supply__name", "supply__unit").annotate(quantity=-Sum("quantity")).order_by("-quantity")
+    by_chair = [{"location": r["chair__name"] or "Bodega central", "cost": round(r["cost"] or 0, 2), "movements": r["n"]}
+                for r in used.values("chair__name").annotate(cost=cost, n=Count("id")).order_by("-cost")]
+    used_by_dentist = [{"dentist": " ".join(filter(None, [r["treatment__dentist__first_name"], r["treatment__dentist__last_name"]])) or "—",
+                   "cost": round(r["cost"] or 0, 2), "movements": r["n"]}
+                  for r in used.values("treatment__dentist__first_name", "treatment__dentist__last_name").annotate(cost=cost, n=Count("id")).order_by("-cost")]
     return Response({
         "production": treatments.aggregate(total=Sum("cost"))["total"] or 0,
         "commissions": list(by_dentist.values()),
@@ -435,6 +496,8 @@ def reports(request):
         "no_show_rate": round(100 * by_status.get("no_asistio", 0) / attended, 1) if attended else None,
         "new_patients": Patient.objects.filter(clinic_id=tenant, created_at__date__gte=start, created_at__date__lte=end).count(),
         "consumption": list(consumption),
+        "consumption_by_location": by_chair,
+        "consumption_by_dentist": used_by_dentist,
         "low_stock": list(Supply.objects.filter(clinic_id=tenant, stock__lte=F("min_stock")).values("name", "unit", "stock", "min_stock")),
     })
 
@@ -502,6 +565,49 @@ def change_password(request):
     user.must_change_password = False
     user.save(update_fields=["password", "must_change_password"])
     return Response({"detail": "Contraseña actualizada"})
+
+
+class VitalSignsViewSet(TenantViewSet):
+    model = VitalSigns
+    resource = "vitals"
+    audited = True
+    serializer_class = VitalSignsSerializer
+    http_method_names = ["get", "post", "head", "options"]  # registro clínico inmutable
+
+    def get_queryset(self):
+        return super().get_queryset().select_related("recorded_by")
+
+    def perform_create(self, serializer):
+        obj = serializer.save(clinic_id=self.request.tenant, recorded_by=self.request.user)
+        audit(self.request, "create", "VitalSigns", obj.pk)
+
+
+class AttachmentViewSet(TenantViewSet):
+    """Archivos del expediente. No se sirven como estáticos: cada descarga pasa por permisos y auditoría."""
+
+    model = Attachment
+    resource = "attachments"
+    audited = True
+    serializer_class = AttachmentSerializer
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+    http_method_names = ["get", "post", "head", "options"]
+
+    def get_queryset(self):
+        return super().get_queryset().select_related("uploaded_by")
+
+    def perform_create(self, serializer):
+        obj = serializer.save(clinic_id=self.request.tenant, uploaded_by=self.request.user)
+        audit(self.request, "create", "Attachment", obj.pk)
+
+    @action(detail=True, methods=["get"])
+    def content(self, request, pk=None):
+        """Contenido del archivo; ?descargar=1 lo baja como archivo (exportación)."""
+        a = self.get_object()
+        download = request.query_params.get("descargar") == "1"
+        audit(request, "export" if download else "read", "Attachment", a.pk)
+        response = FileResponse(a.file.open("rb"), content_type=a.content_type, as_attachment=download, filename=a.original_name)
+        response["X-Content-Type-Options"] = "nosniff"
+        return response
 
 
 class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):

@@ -41,17 +41,20 @@ Requisitos en `docs/Documento de Requerimientos de Software - Sistema Odontológ
 | RF-11 | Confirmación al agendar y recordatorios 48 h/24 h (servicio `reminders`; adaptador **simulado**, ver `docker compose logs reminders`) |
 | RF-07 | Presupuestos por fases desde el catálogo (honorario + laboratorio), con descuento autorizado hasta `MAX_DISCOUNT_PCT` (15 %); un presupuesto emitido no se edita |
 | RF-08 | Aprobación total o parcial (recepción u odontólogo); lo aprobado pasa a la agenda y a "Por tratar", y se registra como tratamiento al precio neto, una sola vez |
-| RF-12 (básico) | Cobros mixtos (efectivo, tarjeta, transferencia, seguro) con comprobante numerado (SRI **simulado**) |
+| RF-12 | Cobros mixtos (efectivo, tarjeta de crédito, tarjeta de débito, transferencia, seguro); comprobante imprimible con datos del comprador (cédula, RUC o consumidor final), IVA 0 % de servicios de salud y código de la pasarela (SRI y pasarela **simulados**) |
 | RF-13 | Liquidación de honorarios por odontólogo: % del precio, monto fijo, o % tras laboratorio y materiales |
-| RF-14 | Receta estándar de consumo por procedimiento; descargo automático de insumos al registrar el tratamiento; kardex inmutable; alerta de stock bajo |
+| RF-14 / 2.2 | Inventario por ubicación (bodega central y cada consultorio), traslados, compras y ajustes; el procedimiento descarga la receta estándar del consultorio donde se hizo; consumo por consultorio y por profesional en Reportes; kardex inmutable; alerta de stock bajo |
+| 2.3 / 7 | Archivos del expediente: radiografías, fotos clínicas y PDF (hasta 15 MB); se valida el tipo real del contenido, se guarda su SHA-256, no se borran y cada consulta o descarga pasa por permisos y auditoría |
+| Signos vitales | Presión, pulso, respiración, temperatura, SpO₂ y glucemia, con alertas clínicas (crisis hipertensiva, saturación baja, fiebre…) |
 | Reportes | Producción, honorarios, procedimientos, ingresos por método, citas por estado y ausentismo, pacientes nuevos, consumo de insumos |
 | RN-02 | Cierre de caja ciego: el total del sistema solo se muestra después de registrar el conteo |
 | RN-03 | No se agendan dos citas a la vez en el mismo sillón ni con el mismo odontólogo |
 | RNF-05 | RBAC con 5 roles; MFA TOTP obligatorio (enrolamiento con QR); sesión cerrada tras 15 min de inactividad (frontend y backend) |
-| RNF-06 | Log de auditoría inmutable (usuario, acción, registro, timestamp ISO-8601, IP) |
-| Administrador TI | Gestión de usuarios de la clínica: alta con contraseña temporal (cambio obligatorio al entrar), cambio de rol, desactivación (cierra su sesión), reinicio de MFA; todo auditado. Cada usuario cambia su contraseña desde «Mi cuenta» |
+| RNF-06 | Log de auditoría inmutable (usuario, acción, registro, timestamp ISO-8601, IP), incluidas las **exportaciones**: impresión de recetas, consentimientos y comprobantes, y descarga de archivos |
+| Administrador TI | Catálogos: procedimientos y precios con su receta de consumo, insumos, consultorios y formatos de consentimiento (se desactivan, no se borran). Gestión de usuarios de la clínica: alta con contraseña temporal (cambio obligatorio al entrar), cambio de rol, desactivación (cierra su sesión), reinicio de MFA; todo auditado. Cada usuario cambia su contraseña desde «Mi cuenta» |
 | RNF-01 / RNF-03 | Expediente p95 de 262 ms con 150 usuarios concurrentes, 0 errores (`tests/load.py`) |
-| RNF-07 | Revisado en iPad horizontal y vertical y en laptop 1366×768; el odontograma completo entra en una tablet |
+| RNF-07 / RNF-08 | Pruebas de navegador (Playwright) en Chromium, Firefox y WebKit (motor de Safari), en 1920×1080, 1366×768 e iPad; el odontograma completo entra en una tablet |
+| RNF-02 | Healthchecks, reinicio automático y monitoreo de disponibilidad con alertas (Uptime Kuma, en producción) |
 | 8.2 | OpenAPI 3 en `/api/schema/` (API clínica) y `/pay/openapi.yaml` (caja) |
 
 Pendientes: cifrado en reposo a nivel de aplicación (se delega al disco cifrado) y conectar los proveedores reales de las integraciones simuladas (ver abajo). Detalle en [docs/seguridad/INFORME.md](docs/seguridad/INFORME.md).
@@ -60,10 +63,11 @@ Pendientes: cifrado en reposo a nivel de aplicación (se delega al disco cifrado
 
 | Entregable | Dónde |
 |---|---|
-| Pruebas de aceptación (45 criterios, contra el sistema desplegado) | `python tests/uat.py [url]` |
+| Pruebas de aceptación (62 criterios, contra el sistema desplegado) | `python tests/uat.py [url]` |
 | Prueba de carga (150 usuarios concurrentes) | `python tests/load.py [url] [usuarios] [segundos]` |
-| Tests Django (27 tests, cobertura 89 %) | `cd backend && coverage run manage.py test` |
-| Tests de integración Go (cobertura 84,7 %) | `sh scripts/test-payments.sh` (con el stack levantado) |
+| Pruebas de navegador (Chromium, Firefox, WebKit; escritorio, laptop, iPad) | `cd tests/e2e && npm i && npx playwright install && npx playwright test` |
+| Tests Django (32 tests, cobertura 89 %) | `cd backend && coverage run manage.py test` |
+| Tests de integración Go (cobertura 85,3 %) | `sh scripts/test-payments.sh` (con el stack levantado) |
 | SAST, auditoría de dependencias y DAST (OWASP ZAP) | CI y `docker compose --profile zap run --rm zap`; informe en [docs/seguridad/INFORME.md](docs/seguridad/INFORME.md) |
 | CI en cada push (tests, cobertura ≥ 80 %, auditorías) | `.github/workflows/ci.yml` |
 | Producción: TLS 1.3, HSTS, secretos obligatorios, healthchecks, backups diarios | `docker-compose.prod.yml`, `frontend/Caddyfile.prod`, [docs/DESPLIEGUE.md](docs/DESPLIEGUE.md) |
@@ -73,10 +77,10 @@ Pendientes: cifrado en reposo a nivel de aplicación (se delega al disco cifrado
 | Usuario | Rol | Ve |
 |---|---|---|
 | `dra.lopez`, `dr.perez` | Odontólogo | Agenda, pacientes, odontograma, tratamientos, SOEP, periodontograma, presupuestos, recetas, consentimientos, inventario |
-| `asistente` | Asistente dental | Agenda, pacientes, SOEP, consentimientos, inventario y kardex (lectura de perio, recetas y presupuestos) |
+| `asistente` | Asistente dental | Agenda, pacientes, signos vitales, SOEP, archivos, consentimientos, inventario, traslados y kardex (lectura de perio, recetas y presupuestos) |
 | `recepcion` | Recepcionista / cajero | Agenda, pacientes, aprobación de presupuestos, cobros, cierre de caja |
-| `auditor` | Auditor / contador | Reportes, honorarios, inventario, cierres de caja, auditoría |
-| `admin` | Administrador TI | Usuarios (alta, rol, desactivar, contraseña temporal, reinicio de MFA), reportes, inventario, cierres de caja, auditoría (sin datos clínicos) |
+| `auditor` | Auditor / contador | Reportes (incluido consumo por consultorio y profesional), honorarios, inventario, cierres de caja, auditoría |
+| `admin` | Administrador TI | Usuarios (alta, rol, desactivar, contraseña temporal, reinicio de MFA), catálogos, reportes, inventario, cierres de caja, auditoría (sin datos clínicos) |
 | `dr.vega`, `recepcion.norte` | Dental Norte | Otra clínica: sirve para comprobar el aislamiento |
 
 ## Integraciones simuladas
@@ -104,7 +108,7 @@ Las integraciones que necesitan cuentas o certificados reales funcionan con **ad
 ```bash
 cd backend && python -m venv .venv && .venv/Scripts/pip install -r requirements.txt
 .venv/Scripts/python manage.py migrate && .venv/Scripts/python manage.py seed
-.venv/Scripts/python manage.py test        # 27 tests de reglas de negocio, RBAC, MFA, usuarios y aislamiento
+.venv/Scripts/python manage.py test        # 32 tests de reglas de negocio, RBAC, MFA, usuarios, archivos, inventario y aislamiento
 .venv/Scripts/python manage.py runserver
 cd frontend && npm install && npm run dev  # proxy a :8000 (Django) y :8081 (Go)
 ```

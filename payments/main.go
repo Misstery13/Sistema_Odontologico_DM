@@ -35,6 +35,8 @@ type Payment struct {
 	Method    string    `json:"method"`
 	Invoice   string    `json:"invoice_number"`
 	Auth      string    `json:"authorization,omitempty"` // código de la pasarela (tarjeta)
+	BuyerID   string    `json:"buyer_id"`                // cédula, RUC o 9999999999999 (consumidor final)
+	BuyerName string    `json:"buyer_name"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -50,7 +52,21 @@ type querier interface {
 //go:embed openapi.yaml
 var openapiSpec []byte
 
-var methods = map[string]bool{"efectivo": true, "tarjeta": true, "transferencia": true, "seguro": true}
+// RF-12: pagos mixtos = varios cobros con métodos distintos ("tarjeta" queda solo para registros antiguos)
+var methods = map[string]bool{"efectivo": true, "tarjeta_credito": true, "tarjeta_debito": true, "transferencia": true, "seguro": true}
+
+const finalConsumer = "9999999999999"
+
+// validBuyer: cédula (10 dígitos), RUC (13 dígitos terminado en 001) o consumidor final, como exige el comprobante.
+// ponytail: valida formato, no el dígito verificador del SRI; agregarlo al conectar la facturación real.
+func validBuyer(id, name string) bool {
+	for _, r := range id {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return strings.TrimSpace(name) != "" && (len(id) == 10 || (len(id) == 13 && (strings.HasSuffix(id, "001") || id == finalConsumer)))
+}
 
 // RBAC (RNF-05), igual criterio que Django: la recepción cobra y cierra caja; auditoría solo lee.
 var (
@@ -102,6 +118,8 @@ func connect(ctx context.Context, dbURL, redisURL string) (*App, error) {
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
 		`ALTER TABLE payments ADD COLUMN IF NOT EXISTS invoice_number TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE payments ADD COLUMN IF NOT EXISTS authorization_code TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE payments ADD COLUMN IF NOT EXISTS buyer_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE payments ADD COLUMN IF NOT EXISTS buyer_name TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS payments_patient_idx ON payments (clinic_id, patient_id)`,
 		`CREATE TABLE IF NOT EXISTS cash_closings (
 			id BIGSERIAL PRIMARY KEY,
@@ -140,6 +158,7 @@ func (a *App) routes() *fiber.App {
 	api.Get("/patients/:id/balance", allow(readers), a.balance)
 	api.Get("/patients/:id/payments", allow(readers), a.listPayments)
 	api.Post("/payments", allow(cashiers), a.createPayment)
+	api.Get("/payments/:id/receipt", allow(readers), a.receipt)
 	api.Post("/cash-closings", allow(cashiers), a.closeCash)
 	api.Get("/cash-closings", allow(auditors), a.listClosings)
 	api.Get("/reports/income", allow(auditors), a.income)
@@ -223,7 +242,7 @@ func (a *App) listPayments(c *fiber.Ctx) error {
 	if err != nil {
 		return fail(c, 404, "Paciente no encontrado")
 	}
-	rows, err := a.db.Query(c.Context(), `SELECT id, amount_cents, method, invoice_number, authorization_code, created_at FROM payments
+	rows, err := a.db.Query(c.Context(), `SELECT id, amount_cents, method, invoice_number, authorization_code, buyer_id, buyer_name, created_at FROM payments
 		WHERE clinic_id = $1 AND patient_id = $2 ORDER BY created_at DESC`, sess(c).clinic, pid)
 	if err != nil {
 		return err
@@ -233,7 +252,7 @@ func (a *App) listPayments(c *fiber.Ctx) error {
 	for rows.Next() {
 		var p Payment
 		var cents int64
-		if err := rows.Scan(&p.ID, &cents, &p.Method, &p.Invoice, &p.Auth, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &cents, &p.Method, &p.Invoice, &p.Auth, &p.BuyerID, &p.BuyerName, &p.CreatedAt); err != nil {
 			return err
 		}
 		p.Amount = float64(cents) / 100
@@ -250,9 +269,15 @@ func (a *App) createPayment(c *fiber.Ctx) error {
 		PatientID int64   `json:"patient_id"`
 		Amount    float64 `json:"amount"`
 		Method    string  `json:"method"`
+		BuyerID   string  `json:"buyer_id"`
+		BuyerName string  `json:"buyer_name"`
 	}
 	if err := c.BodyParser(&in); err != nil {
 		return fail(c, 400, "JSON inválido")
+	}
+	in.BuyerID, in.BuyerName = strings.TrimSpace(in.BuyerID), strings.TrimSpace(in.BuyerName)
+	if !validBuyer(in.BuyerID, in.BuyerName) {
+		return fail(c, 400, "Datos del comprobante inválidos: cédula (10 dígitos), RUC (13) o consumidor final, y nombre")
 	}
 	cents := parseCents(in.Amount)
 	if cents <= 0 {
@@ -284,13 +309,13 @@ func (a *App) createPayment(c *fiber.Ctx) error {
 	if cents > bal {
 		return fail(c, 422, "El monto excede el saldo pendiente")
 	}
-	p := Payment{Amount: float64(cents) / 100, Method: in.Method}
-	err = tx.QueryRow(ctx, `INSERT INTO payments (clinic_id, patient_id, amount_cents, method)
-		VALUES ($1, $2, $3, $4) RETURNING id, created_at`, clinic, in.PatientID, cents, in.Method).Scan(&p.ID, &p.CreatedAt)
+	p := Payment{Amount: float64(cents) / 100, Method: in.Method, BuyerID: in.BuyerID, BuyerName: in.BuyerName}
+	err = tx.QueryRow(ctx, `INSERT INTO payments (clinic_id, patient_id, amount_cents, method, buyer_id, buyer_name)
+		VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, created_at`, clinic, in.PatientID, cents, in.Method, in.BuyerID, in.BuyerName).Scan(&p.ID, &p.CreatedAt)
 	if err != nil {
 		return err
 	}
-	if in.Method == "tarjeta" { // dentro de la transacción: si la pasarela rechaza, el cobro no queda registrado
+	if strings.HasPrefix(in.Method, "tarjeta") { // dentro de la transacción: si la pasarela rechaza, el cobro no queda registrado
 		if p.Auth, err = authorizeCard(cents, clinic); err != nil {
 			return fail(c, 402, "La pasarela rechazó la tarjeta: "+err.Error())
 		}
@@ -303,6 +328,39 @@ func (a *App) createPayment(c *fiber.Ctx) error {
 		return err
 	}
 	return c.Status(201).JSON(p)
+}
+
+// receipt devuelve el comprobante imprimible y registra la exportación en la auditoría clínica (RNF-06).
+func (a *App) receipt(c *fiber.Ctx) error {
+	s := sess(c)
+	pid, err := c.ParamsInt("id")
+	if err != nil {
+		return fail(c, 404, "Comprobante no encontrado")
+	}
+	var p Payment
+	var cents int64
+	var clinicName, patientName string
+	err = a.db.QueryRow(c.Context(), `SELECT p.id, p.amount_cents, p.method, p.invoice_number, p.authorization_code, p.buyer_id,
+		p.buyer_name, p.created_at, k.name, pa.first_name || ' ' || pa.last_name
+		FROM payments p JOIN clinica_clinic k ON k.id = p.clinic_id JOIN clinica_patient pa ON pa.id = p.patient_id
+		WHERE p.id = $1 AND p.clinic_id = $2`, pid, s.clinic).Scan(&p.ID, &cents, &p.Method, &p.Invoice, &p.Auth, &p.BuyerID,
+		&p.BuyerName, &p.CreatedAt, &clinicName, &patientName)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fail(c, 404, "Comprobante no encontrado")
+	} else if err != nil {
+		return err
+	}
+	p.Amount = float64(cents) / 100
+	ip := strings.TrimSpace(strings.Split(c.Get("X-Forwarded-For"), ",")[0])
+	if ip == "" {
+		ip = c.IP()
+	}
+	if _, err := a.db.Exec(c.Context(), `INSERT INTO clinica_auditlog (clinic_id, user_id, action, model, object_id, ip, timestamp)
+		VALUES ($1, $2, 'export', 'Payment', $3, $4, now())`, s.clinic, s.user, fmt.Sprint(p.ID), ip); err != nil {
+		return err
+	}
+	return c.JSON(fiber.Map{"payment": p, "clinic": clinicName, "patient": patientName,
+		"tax": fiber.Map{"iva_rate": 0, "note": "Servicios de salud: tarifa 0 % de IVA"}})
 }
 
 // closeCash registra el conteo físico del efectivo del día. RN-02: el total teórico solo se revela

@@ -28,9 +28,11 @@ components:
       properties:
         id: { type: integer }
         amount: { type: number, example: 40.5 }
-        method: { type: string, enum: [efectivo, tarjeta, transferencia, seguro] }
+        method: { type: string, enum: [efectivo, tarjeta_credito, tarjeta_debito, transferencia, seguro] }
         invoice_number: { type: string, example: "001-001-000000123" }
         authorization: { type: string, example: "SIM-482913", description: Código de la pasarela (solo tarjeta) }
+        buyer_id: { type: string, example: "0912345678", description: "Cédula (10), RUC (13, termina en 001) o 9999999999999 (consumidor final)" }
+        buyer_name: { type: string }
         created_at: { type: string, format: date-time }
     Closing:
       type: object
@@ -94,11 +96,13 @@ paths:
           application/json:
             schema:
               type: object
-              required: [patient_id, amount, method]
+              required: [patient_id, amount, method, buyer_id, buyer_name]
               properties:
                 patient_id: { type: integer }
                 amount: { type: number, minimum: 0.01 }
-                method: { type: string, enum: [efectivo, tarjeta, transferencia, seguro] }
+                method: { type: string, enum: [efectivo, tarjeta_credito, tarjeta_debito, transferencia, seguro] }
+                buyer_id: { type: string }
+                buyer_name: { type: string }
       responses:
         "201":
           description: Cobro registrado
@@ -109,6 +113,17 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "402": { description: La pasarela rechazó la tarjeta, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "422": { description: El monto excede el saldo pendiente, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /payments/{id}/receipt:
+    get:
+      summary: Comprobante imprimible (registra la exportación en la auditoría, RNF-06)
+      description: "Roles: recepcion, odontologo, asistente, auditor. IVA 0 % (servicios de salud)."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { description: "Comprobante: payment, clinic, patient, tax" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Comprobante inexistente o de otra clínica }
   /cash-closings:
     post:
       summary: Cierre de caja ciego del día (RN-02)

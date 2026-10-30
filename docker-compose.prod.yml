@@ -76,19 +76,32 @@ services:
       RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
     volumes:
       - ./backups:/backups
+      - media:/media:ro
     entrypoint: ["sh", "-c"]
     command:
       - |
         while true; do
-          f=/backups/odonto-$$(date +%F-%H%M).dump
-          pg_dump -h db -U odonto -Fc odonto > "$$f.tmp" && mv "$$f.tmp" "$$f" && echo "respaldo $$f"
-          find /backups -name 'odonto-*.dump' -mtime +$$RETENTION_DAYS -delete
+          f=/backups/odonto-$$(date +%F-%H%M)
+          pg_dump -h db -U odonto -Fc odonto > "$$f.dump.tmp" && mv "$$f.dump.tmp" "$$f.dump" && echo "respaldo $$f.dump"
+          tar -czf "$$f-archivos.tar.gz.tmp" -C /media . && mv "$$f-archivos.tar.gz.tmp" "$$f-archivos.tar.gz" && echo "respaldo $$f-archivos.tar.gz"
+          find /backups -name 'odonto-*' -mtime +$$RETENTION_DAYS -delete
           sleep 86400
         done
     depends_on:
       db:
         condition: service_healthy
 
+  # RNF-02: monitoreo de disponibilidad con alertas (email, Telegram, etc.). Solo accesible desde el servidor:
+  #   ssh -L 3001:127.0.0.1:3001 servidor  →  http://localhost:3001  (ver docs/DESPLIEGUE.md)
+  monitor:
+    <<: *restart
+    image: louislam/uptime-kuma:1.23.16
+    ports:
+      - "127.0.0.1:3001:3001"
+    volumes:
+      - monitor_data:/app/data
+
 volumes:
   caddy_data:
   caddy_config:
+  monitor_data:

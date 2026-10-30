@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import uuid
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -54,10 +55,11 @@ class User(AbstractUser):
 
 
 class Chair(models.Model):
-    """Sillón dental físico (RF-09, RN-03)."""
+    """Consultorio / sillón dental físico (RF-09, RN-03); también es una ubicación de inventario."""
 
     clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE)
     name = models.CharField(max_length=40)
+    active = models.BooleanField(default=True)
 
     class Meta:
         ordering = ["name"]
@@ -181,6 +183,7 @@ class Treatment(models.Model):
     notes = models.TextField(blank=True)
     catalog = models.ForeignKey("Procedure", null=True, blank=True, on_delete=models.PROTECT)
     dentist = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="treatments_done")
+    chair = models.ForeignKey(Chair, null=True, blank=True, on_delete=models.PROTECT, related_name="treatments")
     lab_cost = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     material_cost = models.DecimalField(max_digits=10, decimal_places=2, default=0)  # según receta de consumo
     budget_item = models.OneToOneField("BudgetItem", null=True, blank=True, on_delete=models.PROTECT, related_name="treatment")
@@ -327,6 +330,7 @@ class ConsentTemplate(models.Model):
     clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE)
     procedure = models.CharField(max_length=120)
     body = models.TextField()
+    active = models.BooleanField(default=True)
 
     class Meta:
         ordering = ["procedure"]
@@ -411,10 +415,11 @@ class RecipeLine(models.Model):
 class StockMovement(models.Model):
     """Kardex inmutable: entradas (compra, ajuste) y salidas (consumo por procedimiento)."""
 
-    REASONS = [("compra", "Compra"), ("consumo", "Consumo"), ("ajuste", "Ajuste")]
+    REASONS = [("compra", "Compra"), ("consumo", "Consumo"), ("ajuste", "Ajuste"), ("traslado", "Traslado")]
 
     clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE)
     supply = models.ForeignKey(Supply, on_delete=models.PROTECT, related_name="movements")
+    chair = models.ForeignKey(Chair, null=True, blank=True, on_delete=models.PROTECT)  # ubicación; vacío = bodega central
     quantity = models.DecimalField(max_digits=12, decimal_places=2)  # + entra, - sale
     reason = models.CharField(max_length=10, choices=REASONS)
     treatment = models.ForeignKey(Treatment, null=True, blank=True, on_delete=models.PROTECT)
@@ -482,3 +487,76 @@ class CommissionRule(models.Model):
             return self.value
         base = treatment.cost - (treatment.lab_cost + treatment.material_cost if self.kind == "pct_net" else 0)
         return (max(base, Decimal(0)) * self.value / 100).quantize(Decimal("0.01"))
+
+
+class VitalSigns(models.Model):
+    """Signos vitales previos a la atención (registrados por la asistente dental)."""
+
+    clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE)
+    patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="vitals")
+    recorded_by = models.ForeignKey(User, on_delete=models.PROTECT)
+    created_at = models.DateTimeField(default=timezone.now)
+    systolic = models.PositiveSmallIntegerField(validators=[MinValueValidator(50), MaxValueValidator(260)])
+    diastolic = models.PositiveSmallIntegerField(validators=[MinValueValidator(30), MaxValueValidator(160)])
+    heart_rate = models.PositiveSmallIntegerField(validators=[MinValueValidator(30), MaxValueValidator(220)])
+    respiratory_rate = models.PositiveSmallIntegerField(null=True, blank=True, validators=[MinValueValidator(5), MaxValueValidator(60)])
+    temperature = models.DecimalField(max_digits=4, decimal_places=1, null=True, blank=True, validators=[MinValueValidator(30), MaxValueValidator(43)])
+    spo2 = models.PositiveSmallIntegerField(null=True, blank=True, validators=[MinValueValidator(50), MaxValueValidator(100)])
+    glucose = models.PositiveSmallIntegerField(null=True, blank=True, validators=[MinValueValidator(20), MaxValueValidator(600)])  # mg/dL
+    notes = models.CharField(max_length=200, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    @property
+    def alerts(self):
+        """Valores que contraindican o condicionan la atención odontológica (p. ej. anestesia con vasoconstrictor)."""
+        out = []
+        if self.systolic >= 180 or self.diastolic >= 110:
+            out.append("Crisis hipertensiva: diferir tratamiento electivo")
+        elif self.systolic >= 140 or self.diastolic >= 90:
+            out.append("Presión elevada")
+        elif self.systolic < 90 or self.diastolic < 60:
+            out.append("Presión baja")
+        if self.heart_rate > 100 or self.heart_rate < 50:
+            out.append("Frecuencia cardíaca fuera de rango")
+        if self.spo2 is not None and self.spo2 < 94:
+            out.append("Saturación de oxígeno baja")
+        if self.temperature is not None and self.temperature >= 38:
+            out.append("Fiebre")
+        if self.glucose is not None and (self.glucose >= 250 or self.glucose < 70):
+            out.append("Glucemia fuera de rango")
+        return out
+
+    def delete(self, *args, **kwargs):
+        raise PermissionDenied("Los registros clínicos no se borran (RN-01)")
+
+
+def attachment_path(instance, filename):
+    # nombre aleatorio: el nombre original no forma parte de la ruta en disco
+    ext = {"image/jpeg": "jpg", "image/png": "png", "application/pdf": "pdf"}[instance.content_type]
+    return f"clinica_{instance.clinic_id}/paciente_{instance.patient_id}/{uuid.uuid4().hex}.{ext}"
+
+
+class Attachment(models.Model):
+    """Archivo del expediente: radiografía, foto clínica o documento PDF (alcance 2.3: archivos planos)."""
+
+    KINDS = [("radiografia", "Radiografía"), ("foto", "Foto clínica"), ("documento", "Documento")]
+
+    clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE)
+    patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="attachments")
+    uploaded_by = models.ForeignKey(User, on_delete=models.PROTECT)
+    created_at = models.DateTimeField(default=timezone.now)
+    kind = models.CharField(max_length=12, choices=KINDS)
+    description = models.CharField(max_length=200, blank=True)
+    original_name = models.CharField(max_length=200)
+    content_type = models.CharField(max_length=40)
+    size = models.PositiveIntegerField()
+    sha256 = models.CharField(max_length=64)  # integridad del archivo
+    file = models.FileField(upload_to=attachment_path)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def delete(self, *args, **kwargs):
+        raise PermissionDenied("Los archivos del expediente no se borran (RN-01)")

@@ -6,18 +6,20 @@ Fecha: 29/10/2026. Alcance: los servicios `backend` (Django), `payments` (Go) y 
 
 | Criterio | Resultado | Evidencia |
 |---|---|---|
-| Cobertura ≥ 80 % en endpoints críticos | **Cumple**: Django 89 %, Go 84,7 % | `coverage report`; `go test -cover` (CI: `.github/workflows/ci.yml`) |
+| Cobertura ≥ 80 % en endpoints críticos | **Cumple**: Django 89 %, Go 85,3 % | `coverage report`; `go test -cover` (CI: `.github/workflows/ci.yml`) |
 | DAST/SAST sin severidad Alta o Crítica | **Cumple**: 0 altas, 0 críticas | ZAP (`zap-baseline.html`, `zap-api.html`), bandit, pip-audit, npm audit, govulncheck |
 | Documentación OpenAPI 3 | **Cumple** | `GET /api/schema/` (API clínica) y `GET /pay/openapi.yaml` (caja y facturación) |
-| Pruebas de aceptación (UAT) | **Cumple**: 45/45 criterios | `tests/uat.py` contra el stack desplegado |
+| Pruebas de aceptación (UAT) | **Cumple**: 62/62 criterios | `tests/uat.py` contra el stack desplegado |
 | RNF-01: expediente en menos de 1,5 s | **Cumple**: p95 262 ms con 150 usuarios | `tests/load.py` (ver «Rendimiento») |
 | RNF-03: 150 usuarios concurrentes | **Cumple**: 0 errores en 21.986 peticiones | `tests/load.py` |
 | RNF-05: MFA obligatorio | **Cumple** | TOTP RFC 6238 en el login; tests y UAT |
-| RNF-07: tablet junto al sillón | **Cumple** | Capturas en 1024×768, 768×1024 y 1366×768, sin desbordes |
+| RNF-07: escritorio, laptop y tablet | **Cumple** | Playwright en 1920×1080, 1366×768, 1440×900 e iPad Pro 11, sin desbordes horizontales |
+| RNF-08: Chrome, Firefox, Edge y Safari | **Cumple** | Playwright en Chromium (Chrome y Edge), Firefox y WebKit (motor de Safari) |
+| RNF-02: disponibilidad | **Implementado** | Healthchecks, reinicio automático, backups y monitoreo con alertas (Uptime Kuma); el 99,9 % se mide en producción |
 
 ## Pruebas automatizadas
 
-- **Django:** 27 tests, incluido el vector oficial TOTP del RFC 6238 y la gestión de usuarios (solo admin, solo su clínica, no puede autodesactivarse, la desactivación cierra la sesión, la contraseña temporal bloquea el acceso hasta cambiarla). Cubren el aislamiento entre clínicas, RBAC, la expiración por inactividad, la auditoría, los choques de sillón y de odontólogo, el bloqueo de notas SOEP, la inmutabilidad (RN-01), el odontograma, el periodontograma, las alertas de alergia, la firma de consentimientos (en pantalla y OTP), los presupuestos con aprobación parcial, el descargo de insumos, los honorarios y la operación (alta de clínica, healthcheck, errores JSON).
+- **Django:** 32 tests (archivos: tipo real y descarga auditada; signos vitales; traslados; exportación; catálogos sin borrado), incluido el vector oficial TOTP del RFC 6238 y la gestión de usuarios (solo admin, solo su clínica, no puede autodesactivarse, la desactivación cierra la sesión, la contraseña temporal bloquea el acceso hasta cambiarla). Cubren el aislamiento entre clínicas, RBAC, la expiración por inactividad, la auditoría, los choques de sillón y de odontólogo, el bloqueo de notas SOEP, la inmutabilidad (RN-01), el odontograma, el periodontograma, las alertas de alergia, la firma de consentimientos (en pantalla y OTP), los presupuestos con aprobación parcial, el descargo de insumos, los honorarios y la operación (alta de clínica, healthcheck, errores JSON).
 - **Go:** tests de integración contra PostgreSQL y Redis reales. Cubren la autenticación, la sesión inactiva, los roles, el aislamiento entre clínicas, las validaciones de cobro, el comprobante, **5 cobros simultáneos que nunca superan el saldo**, el cierre de caja ciego y el reporte de ingresos.
 - **UAT:** 37 criterios de punta a punta a través de Caddy, uno o más por requisito (RF-01 a RF-14, RN-01 a RN-03, RNF-05, RNF-06).
 
@@ -55,7 +57,8 @@ Fecha: 29/10/2026. Alcance: los servicios `backend` (Django), `payments` (Go) y 
 | A05 Configuración | DEBUG apagado y secretos validados al arrancar. Contenedores sin root. BD y Redis sin puertos públicos. Cabeceras de seguridad. |
 | A06 Componentes vulnerables | Auditoría de dependencias en cada push (CI). |
 | A07 Autenticación | Contraseñas temporales asignadas por el administrador con cambio obligatorio (también en el servicio Go). **MFA TOTP obligatorio** (enrolamiento con QR en el primer ingreso; el ticket entre pasos vence en 5 min; cada código sirve una sola vez). Límite de 10 intentos por minuto en cada paso. Validadores de contraseña (mínimo 10, no comunes). Sesión cerrada tras 15 min de inactividad. Token nuevo en cada ingreso. |
-| A09 Registro y monitoreo | Log de auditoría inmutable: quién, qué, cuándo (ISO-8601) e IP. Kardex inmutable. Logs de acceso de gunicorn. |
+| A09 Registro y monitoreo | Log de auditoría inmutable: quién, qué, cuándo (ISO-8601), IP y exportaciones. Kardex inmutable. Logs de acceso de gunicorn. Monitoreo de disponibilidad con alertas. |
+| A08 Integridad de datos | Archivos del expediente validados por su firma binaria (no por la extensión), con SHA-256 guardado y servidos solo por la API, con `nosniff` y sin borrado. |
 
 ## Pendientes conocidos (fuera del alcance de esta entrega)
 

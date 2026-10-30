@@ -48,9 +48,24 @@ El reloj del servidor debe estar sincronizado (NTP), porque los códigos depende
 | `payments` | Cobros, caja y comprobantes (Go) | `/pay/health` |
 | `reminders` | Recordatorios de 48 h y 24 h, cada 15 min | — |
 | `db`, `redis` | PostgreSQL 16 y Redis 7; no se exponen fuera de la red interna | `pg_isready` |
-| `backup` | `pg_dump` diario en `./backups`, con retención de `BACKUP_RETENTION_DAYS` días | — |
+| `backup` | Diario en `./backups`: `pg_dump` de la base y `.tar.gz` de los archivos del expediente, con retención de `BACKUP_RETENTION_DAYS` días | — |
+| `monitor` | Uptime Kuma: monitoreo de disponibilidad con alertas (RNF-02); solo escucha en `127.0.0.1:3001` | — |
 
 Todos los servicios tienen `restart: unless-stopped`. Caddy espera a que backend y payments estén sanos antes de aceptar tráfico.
+
+## Monitoreo y alertas (RNF-02)
+
+Uptime Kuma no se publica a Internet. Para configurarlo, abre un túnel SSH y entra desde tu navegador:
+
+```bash
+ssh -L 3001:127.0.0.1:3001 usuario@servidor    # luego abrir http://localhost:3001
+```
+
+1. Crea la cuenta de administración del monitor.
+2. Agrega dos monitores HTTP cada 60 s: `https://odonto.midominio.com/api/health/` y `https://odonto.midominio.com/pay/health`. Agrega también un monitor del certificado TLS.
+3. En *Notificaciones*, configura email, Telegram o WhatsApp, y la página de estado si se necesita.
+
+Uptime Kuma lleva el historial de disponibilidad, que es lo que sirve para comprobar el 99,9 % en horario clínico.
 
 ## Actualizar a una nueva versión
 
@@ -75,6 +90,8 @@ Para restaurar, primero se detienen los servicios que escriben en la base:
 C="docker compose -f docker-compose.yml -f docker-compose.prod.yml"
 $C stop backend payments reminders
 $C exec backup pg_restore -h db -U odonto -d odonto --clean --if-exists /backups/odonto-AAAA-MM-DD-HHMM.dump
+# archivos del expediente (radiografías, fotos, PDF):
+$C run --rm -v "$PWD/backups:/backups" --entrypoint sh backend -c "tar -xzf /backups/odonto-AAAA-MM-DD-HHMM-archivos.tar.gz -C /app/media"
 $C start backend payments reminders
 ```
 

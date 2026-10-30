@@ -54,3 +54,18 @@ export const printElement = (el) => {
 };
 
 export const fmtDateTime = (s) => new Date(s).toLocaleString("es-EC", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+
+// subida multipart (archivos del expediente): el navegador pone el Content-Type con su boundary
+export async function apiUpload(path, formData) {
+  const res = await fetch(path, { method: "POST", headers: { Authorization: `Token ${getSession()?.token}` }, body: formData });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(errorText(data));
+  return data;
+}
+
+// descarga autenticada como Blob: los archivos clínicos no son públicos, así que <img src> no puede pedirlos directo
+export async function apiBlob(path) {
+  const res = await fetch(path, { headers: { Authorization: `Token ${getSession()?.token}` } });
+  if (!res.ok) throw new Error(errorText(await res.json().catch(() => null)));
+  return res.blob();
+}
