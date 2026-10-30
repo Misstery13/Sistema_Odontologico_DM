@@ -1,4 +1,5 @@
 // Flujos principales en cada navegador y tamaño de pantalla. Se ejecutan contra el sistema levantado con datos demo.
+import { readFileSync } from "node:fs";
 import { expect, test } from "@playwright/test";
 
 const as = (user) => ({ storageState: `.auth/${user}.json` });
@@ -54,10 +55,26 @@ test.describe("odontóloga", () => {
 
   test("agenda por día y semana", async ({ page }) => {
     await page.goto("/citas");
+    // WebSocket de la agenda en vivo conectado a través de Caddy (y permitido por la CSP) en cada motor
+    await expect(page.getByText("En vivo")).toBeVisible();
     await page.getByRole("button", { name: "Semana" }).click();
     await expect(page.getByRole("heading", { name: /Semana del/ })).toBeVisible();
     await expect(page.getByLabel("Consultorio").first()).toBeVisible();
     await noHorizontalOverflow(page);
+  });
+
+  test("agenda en vivo: un cambio de recepción recarga la vista de la odontóloga", async ({ page, request }, info) => {
+    test.skip(info.project.name !== "chrome-1920", "modifica una cita: se ejecuta en un solo navegador");
+    await page.goto("/citas");
+    await expect(page.getByText("En vivo")).toBeVisible();
+    await page.waitForLoadState("networkidle"); // que no cuente la recarga inicial al conectar
+    const session = JSON.parse(JSON.parse(readFileSync(".auth/recepcion.json", "utf8")).origins[0].localStorage[0].value);
+    const headers = { Authorization: `Token ${session.token}` };
+    const [appt] = await (await request.get("/api/appointments/", { headers })).json();
+    const reloaded = page.waitForResponse((r) => r.url().includes("/api/appointments/?"));
+    // guardar la cita sin cambiar nada basta para disparar el aviso, y no altera los datos demo
+    expect((await request.patch(`/api/appointments/${appt.id}/`, { headers, data: { status: appt.status } })).status()).toBe(200);
+    await reloaded;
   });
 });
 

@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -15,8 +16,10 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -27,6 +30,7 @@ import (
 type App struct {
 	db  *pgxpool.Pool
 	rdb *redis.Client
+	hub *hub
 }
 
 type Payment struct {
@@ -115,6 +119,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	go app.listen(ctx)
 	log.Fatal(app.routes().Listen(":8080"))
 }
 
@@ -160,7 +165,7 @@ func connect(ctx context.Context, dbURL, redisURL string) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &App{db: db, rdb: redis.NewClient(opt)}, nil
+	return &App{db: db, rdb: redis.NewClient(opt), hub: &hub{subs: map[int64]map[chan struct{}]bool{}}}, nil
 }
 
 func (a *App) routes() *fiber.App {
@@ -175,6 +180,13 @@ func (a *App) routes() *fiber.App {
 		c.Set(fiber.HeaderContentType, "application/yaml")
 		return c.Send(openapiSpec)
 	})
+	// antes del grupo con a.auth: el WebSocket se autentica con su primer mensaje
+	f.Get("/pay/ws", func(c *fiber.Ctx) error {
+		if !websocket.IsWebSocketUpgrade(c) {
+			return fail(c, 426, "Se requiere una conexión WebSocket")
+		}
+		return c.Next()
+	}, websocket.New(a.agendaSocket))
 	api := f.Group("/pay", a.auth)
 	api.Get("/patients/:id/balance", allow(readers), a.balance)
 	api.Get("/patients/:id/payments", allow(readers), a.listPayments)
@@ -208,26 +220,175 @@ func (a *App) auth(c *fiber.Ctx) error {
 	if !ok || key == "" {
 		return fail(c, 401, "Token requerido")
 	}
-	ctx := c.Context()
+	s, err := a.session(c.Context(), key)
+	if err != nil {
+		return fail(c, 401, "Sesión inválida o cerrada por inactividad")
+	}
+	c.Locals("session", s)
+	return c.Next()
+}
+
+func (a *App) session(ctx context.Context, key string) (session, error) {
 	var s session
 	if parts := strings.SplitN(a.rdb.Get(ctx, "tok:"+key).Val(), ":", 3); len(parts) == 3 {
 		s.user, _ = strconv.ParseInt(parts[0], 10, 64)
 		s.clinic, _ = strconv.ParseInt(parts[1], 10, 64)
 		s.role = parts[2]
-	} else { // no está en caché (o Redis caído): ir a la base y contar esta petición como actividad
-		err := a.db.QueryRow(ctx, `
-			UPDATE clinica_user u SET last_activity = now() FROM authtoken_token t
-			WHERE t.key = $1 AND u.id = t.user_id AND u.is_active AND u.clinic_id IS NOT NULL AND NOT u.must_change_password
-			  AND u.last_activity > now() - make_interval(mins => $2)
-			RETURNING u.id, u.clinic_id, u.role`, key, idleMinutes).Scan(&s.user, &s.clinic, &s.role)
-		if err != nil {
-			return fail(c, 401, "Sesión inválida o cerrada por inactividad")
-		}
-		// TTL corto: una sesión vencida en Django deja de valer aquí en menos de un minuto
-		a.rdb.Set(ctx, "tok:"+key, fmt.Sprintf("%d:%d:%s", s.user, s.clinic, s.role), time.Minute)
+		return s, nil
 	}
-	c.Locals("session", s)
-	return c.Next()
+	// no está en caché (o Redis caído): ir a la base y contar esta petición como actividad
+	err := a.db.QueryRow(ctx, `
+		UPDATE clinica_user u SET last_activity = now() FROM authtoken_token t
+		WHERE t.key = $1 AND u.id = t.user_id AND u.is_active AND u.clinic_id IS NOT NULL AND NOT u.must_change_password
+		  AND u.last_activity > now() - make_interval(mins => $2)
+		RETURNING u.id, u.clinic_id, u.role`, key, idleMinutes).Scan(&s.user, &s.clinic, &s.role)
+	if err != nil {
+		return s, err
+	}
+	// TTL corto: una sesión vencida en Django deja de valer aquí en menos de un minuto
+	a.rdb.Set(ctx, "tok:"+key, fmt.Sprintf("%d:%d:%s", s.user, s.clinic, s.role), time.Minute)
+	return s, nil
+}
+
+// --- Agenda en vivo (RF-09/RF-10) ---
+// Django publica pg_notify('agenda', {"clinic": id}) al guardar una cita; este servicio lo reenvía por WebSocket
+// a las pantallas abiertas de esa clínica, que vuelven a pedir la agenda a Django (con su RBAC y auditoría).
+// Vive aquí y no en Django porque gunicorn atiende con un número fijo de hilos y cada WebSocket ocuparía uno.
+
+// mismo criterio que PERMISSIONS["appointments"] en Django
+var agendaReaders = []string{"recepcion", "odontologo", "asistente"}
+
+// cada cuánto se revisa que la sesión siga activa (cierre por 15 min de inactividad, RNF-05)
+var socketCheck = time.Minute
+
+// hub reparte los avisos por clínica. Cada suscriptor tiene un canal con buffer 1: una ráfaga de cambios
+// se reduce a una sola recarga.
+type hub struct {
+	mu   sync.Mutex
+	subs map[int64]map[chan struct{}]bool
+}
+
+func (h *hub) subscribe(clinic int64) chan struct{} {
+	ch := make(chan struct{}, 1)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.subs[clinic] == nil {
+		h.subs[clinic] = map[chan struct{}]bool{}
+	}
+	h.subs[clinic][ch] = true
+	return ch
+}
+
+func (h *hub) unsubscribe(clinic int64, ch chan struct{}) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.subs[clinic], ch)
+}
+
+func (h *hub) publish(clinic int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for ch := range h.subs[clinic] {
+		select {
+		case ch <- struct{}{}:
+		default: // ya tiene un aviso pendiente
+		}
+	}
+}
+
+// listen escucha el canal 'agenda' de PostgreSQL con una conexión propia y se reconecta si se cae.
+func (a *App) listen(ctx context.Context) {
+	for ctx.Err() == nil {
+		if err := a.listenOnce(ctx); err != nil && ctx.Err() == nil {
+			log.Printf("agenda en vivo: %v; reintento en 2 s", err)
+			time.Sleep(2 * time.Second)
+		}
+	}
+}
+
+func (a *App) listenOnce(ctx context.Context) error {
+	conn, err := pgx.ConnectConfig(ctx, a.db.Config().ConnConfig.Copy())
+	if err != nil {
+		return err
+	}
+	defer conn.Close(context.Background())
+	if _, err := conn.Exec(ctx, "LISTEN agenda"); err != nil {
+		return err
+	}
+	for {
+		n, err := conn.WaitForNotification(ctx)
+		if err != nil {
+			return err
+		}
+		var msg struct {
+			Clinic int64 `json:"clinic"`
+		}
+		if json.Unmarshal([]byte(n.Payload), &msg) == nil {
+			a.hub.publish(msg.Clinic)
+		}
+	}
+}
+
+// active revisa la sesión sin contarla como actividad: tener la agenda abierta no evita el cierre por inactividad.
+func (a *App) active(ctx context.Context, key string) bool {
+	var ok bool
+	a.db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM clinica_user u JOIN authtoken_token t ON t.user_id = u.id
+		WHERE t.key = $1 AND u.is_active AND NOT u.must_change_password AND u.last_activity > now() - make_interval(mins => $2))`,
+		key, idleMinutes).Scan(&ok)
+	return ok
+}
+
+// agendaSocket: el navegador no puede enviar cabeceras al abrir un WebSocket, así que el token llega en el primer
+// mensaje (nunca en la URL, que queda en los logs). Al cliente solo se le avisa "cambió la agenda", sin datos clínicos.
+func (a *App) agendaSocket(c *websocket.Conn) {
+	ctx := context.Background()
+	var in struct {
+		Token string `json:"token"`
+	}
+	c.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if err := c.ReadJSON(&in); err != nil {
+		return
+	}
+	s, err := a.session(ctx, in.Token)
+	if err != nil || !slices.Contains(agendaReaders, s.role) {
+		c.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4001, "Sesión inválida"))
+		return
+	}
+	c.SetReadDeadline(time.Time{})
+	ch := a.hub.subscribe(s.clinic)
+	defer a.hub.unsubscribe(s.clinic, ch)
+	closed := make(chan struct{})
+	go func() { // lector: detecta el cierre del navegador y procesa los pong
+		defer close(closed)
+		for {
+			if _, _, err := c.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+	if c.WriteJSON(fiber.Map{"type": "ready"}) != nil {
+		return
+	}
+	tick := time.NewTicker(socketCheck)
+	defer tick.Stop()
+	for {
+		select {
+		case <-closed:
+			return
+		case <-ch:
+			if c.WriteJSON(fiber.Map{"type": "agenda"}) != nil {
+				return
+			}
+		case <-tick.C:
+			if !a.active(ctx, in.Token) {
+				c.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4001, "Sesión cerrada por inactividad"))
+				return
+			}
+			if c.WriteMessage(websocket.PingMessage, nil) != nil {
+				return
+			}
+		}
+	}
 }
 
 func balanceCents(ctx context.Context, q querier, clinic, patient int64) (int64, error) {

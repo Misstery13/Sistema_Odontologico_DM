@@ -5,14 +5,15 @@ Proyecto de la asignatura *Framework Programación Web* (ver `docs/`). Es un sis
 | Servicio | Tecnología | Unidad del sílabo |
 |---|---|---|
 | `frontend` | React + Vite + Tailwind, React Router, Context para la sesión | 1 |
-| `payments` | Go + Fiber, PostgreSQL (transacciones con `FOR UPDATE`), Redis (caché de tokens) | 2 |
+| `payments` | Go + Fiber, PostgreSQL (transacciones con `FOR UPDATE`, `LISTEN/NOTIFY`), Redis (caché de tokens), WebSocket de la agenda en vivo | 2 |
 | `backend` | Django + DRF, ORM y migraciones, middleware de tenant | 3 |
 | `caddy` | Proxy inverso, cabeceras de seguridad, SSL automático con dominio; Docker Compose y OWASP ZAP | 4 |
 
 ```
-navegador ──► caddy :8080 ──► /api/*  → backend (Django)  ─┐
-                          ├─► /pay/*  → payments (Go) ─────┼─► PostgreSQL
-                          └─► /*      → SPA React          └─► Redis (Go)
+navegador ──► caddy :8080 ──► /api/*    → backend (Django)  ─┐
+                          ├─► /pay/*    → payments (Go) ─────┼─► PostgreSQL
+                          ├─► /pay/ws   → payments (WebSocket)│     (Django avisa con pg_notify, Go escucha con LISTEN)
+                          └─► /*        → SPA React          └─► Redis (Go)
 ```
 
 ## Ejecutar
@@ -105,6 +106,27 @@ Las integraciones que necesitan cuentas o certificados reales funcionan con **ad
 | WhatsApp / SMS / email | Confirmación de cita y recordatorios de 48 h y 24 h | `docker compose logs reminders backend` | `send` en `backend/clinica/notify.py` |
 | OTP del consentimiento | Envía el código de 6 dígitos por el mismo canal | `docker compose logs backend` | `send` en `backend/clinica/notify.py` |
 | Firma digital del profesional | HMAC-SHA256 del servidor sobre el contenido del registro | campo `signature` | `sign` en `backend/clinica/models.py` (certificado personal / PKI) |
+
+## Decisiones de arquitectura
+
+El SRS propone una arquitectura *sugerida* (sección 7). Esto es lo que se aplicó y por qué algunas piezas se resolvieron distinto.
+
+| Sugerido en el SRS | Implementado | Motivo |
+|---|---|---|
+| React / Angular / Vue + Tailwind CSS | React 18 + Tailwind v4 | Unidad 1 del sílabo. |
+| HTTPS | Caddy con TLS 1.3 y HSTS; en el servidor casero, HTTPS de Tailscale Funnel | Ver [docs/despliegue/tailscale-funnel.md](docs/despliegue/tailscale-funnel.md). |
+| WSS | **Agenda en vivo** por WebSocket (`/pay/ws`) | Django guarda la cita y emite `pg_notify('agenda', {"clinic": id})`. El servicio Go escucha con `LISTEN` y avisa a las pantallas abiertas de esa clínica, que vuelven a pedir la agenda a Django con sus permisos y su auditoría. El aviso no lleva datos del paciente. El token viaja en el primer mensaje, nunca en la URL, y la conexión se cierra a los 15 min de inactividad (RNF-05). Vive en Go porque gunicorn atiende con un número fijo de hilos y cada WebSocket ocuparía uno. |
+| JWT | Token opaco de DRF con vencimiento por inactividad | El RNF-05 exige cerrar la sesión a los 15 min sin actividad, y el administrador puede desactivar usuarios. Con un token guardado en el servidor, ambas cosas tienen efecto inmediato; un JWT sigue siendo válido hasta que vence y obligaría a mantener una lista de revocación. Go valida el mismo token contra la base, con caché de 1 min en Redis. |
+| API Gateway / Ingress | Caddy | Enruta `/api` a Django y `/pay` a Go, limita el tamaño de las peticiones y agrega las cabeceras de seguridad. |
+| Servicio clínico y agenda | Django + DRF | Unidad 3 del sílabo. |
+| Servicio de facturación y stock | Go + Fiber: cobros, comprobantes, anulaciones y caja | El **stock** quedó en Django: el descargo de insumos (RF-14) se hace en la misma transacción que registra el tratamiento, y separarlo exigiría una transacción distribuida. |
+| PostgreSQL / MySQL | PostgreSQL 16 | Una sola base compartida: Go lee las tablas de Django (tokens, pacientes, tratamientos) y tiene las suyas (`payments`, `cash_closings`). |
+| Redis (caché y mensajería) | Redis como caché de sesiones del servicio Go | La mensajería de la agenda usa `LISTEN/NOTIFY` de PostgreSQL: el aviso se emite solo si la transacción que guardó la cita se confirma, y no hace falta otra pieza. |
+| S3 / Azure Blob (radiografías, fotos, PDFs) | Archivos en un volumen de Docker, incluido en el respaldo diario | Con un solo servidor, el disco local con respaldo cumple la misma función sin una cuenta en la nube. Para pasar a S3 (o a MinIO, un servidor compatible con S3 que corre en Docker) basta con configurar `django-storages` como almacenamiento de `FileField`, sin tocar las vistas. |
+| PWA / app móvil | No incluida | El SRS la deja fuera del alcance de la Fase 1. |
+| PACS / DICOM | No incluido | El SRS lo marca como integración futura; las radiografías se guardan como archivos planos (alcance 2.3). |
+
+Además de lo que pide el SRS se agregó el **servicio Go** como segundo backend (unidad 2 del sílabo); el **monitor Uptime Kuma** y los **respaldos diarios**, que apoyan el RNF-02 y el permiso de *backups* del administrador; y la **batería de pruebas**: UAT, carga, navegadores con Playwright y CI. Sirve para demostrar los criterios de aceptación de la sección 8.
 
 ## Seguridad (OWASP)
 

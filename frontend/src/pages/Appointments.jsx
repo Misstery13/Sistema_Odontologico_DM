@@ -1,6 +1,37 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, formSubmit } from "../api.js";
+import { api, formSubmit, getSession } from "../api.js";
+
+// Agenda en vivo: el servicio de caja avisa por WebSocket cuando cambia una cita de la clínica y la vista se recarga.
+// El aviso no trae datos: la agenda se vuelve a pedir a Django, que aplica permisos y auditoría.
+function useLiveAgenda(onChange) {
+  const [live, setLive] = useState(false);
+  const callback = useRef(onChange);
+  callback.current = onChange;
+  useEffect(() => {
+    let ws, retry;
+    let stopped = false;
+    const connect = () => {
+      ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/pay/ws`);
+      ws.onopen = () => ws.send(JSON.stringify({ token: getSession()?.token })); // nunca en la URL: quedaría en los logs
+      ws.onmessage = (e) => {
+        if (JSON.parse(e.data).type === "ready") setLive(true);
+        callback.current(); // también al reconectar: recupera lo que cambió mientras estuvo desconectada
+      };
+      ws.onclose = (e) => {
+        setLive(false);
+        if (!stopped && e.code !== 4001) retry = setTimeout(connect, 5000); // 4001: sesión cerrada, no reintentar
+      };
+    };
+    connect();
+    return () => {
+      stopped = true;
+      clearTimeout(retry);
+      ws.close();
+    };
+  }, []);
+  return live;
+}
 
 const iso = (d) => d.toLocaleDateString("sv"); // YYYY-MM-DD en hora local
 const shift = (date, days) => {
@@ -79,6 +110,7 @@ export default function Appointments() {
   useEffect(() => {
     load();
   }, [from, to, filters]);
+  const live = useLiveAgenda(load);
   useEffect(() => {
     setPlanned([]);
     if (patient) api(`/api/budgets/pending/?patient=${patient}`).then(setPlanned);
@@ -127,6 +159,11 @@ export default function Appointments() {
         <div className="flex flex-wrap items-center gap-3 border-b-2 border-print px-5 py-4">
           <h1 className="text-xl font-semibold first-letter:uppercase">{title}</h1>
           <span className="text-sm text-pencil">{active} {active === 1 ? "cita" : "citas"}</span>
+          {live && (
+            <span className="flex items-center gap-1.5 text-sm text-pencil" title="Los cambios de otros usuarios aparecen sin recargar">
+              <span className="size-2 rounded-full bg-pen" aria-hidden="true" />En vivo
+            </span>
+          )}
           <div className="ml-auto flex flex-wrap items-center gap-3">
             <div className="flex rounded-[3px] border border-pen" role="group" aria-label="Vista">
               <button onClick={() => setView("dia")} className={tab("dia")} aria-pressed={view === "dia"}>Día</button>

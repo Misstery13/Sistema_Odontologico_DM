@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	fws "github.com/fasthttp/websocket"
 	"github.com/gofiber/fiber/v2"
 )
 
@@ -295,5 +297,89 @@ func TestVoidPayment(t *testing.T) {
 	exec(t, a, `UPDATE clinica_treatment SET voided = true WHERE patient_id = $1 RETURNING id`, fx.patient)
 	if balance() != -10 {
 		t.Errorf("tratamiento anulado sigue sumando: %v", balance())
+	}
+}
+
+func TestHubPerClinicAndCoalesced(t *testing.T) {
+	h := &hub{subs: map[int64]map[chan struct{}]bool{}}
+	ch := h.subscribe(1)
+	h.publish(2) // otra clínica
+	h.publish(1)
+	h.publish(1) // ráfaga: queda un solo aviso pendiente
+	if len(ch) != 1 {
+		t.Fatalf("avisos pendientes: %d", len(ch))
+	}
+	<-ch
+	h.unsubscribe(1, ch)
+	h.publish(1)
+	if len(ch) != 0 {
+		t.Error("llegó un aviso después de desuscribirse")
+	}
+}
+
+func TestAgendaSocket(t *testing.T) {
+	a, f := setup(t)
+	fx := newClinic(t, a)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go f.Listener(ln)
+	defer f.Shutdown()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.listen(ctx)
+	defer func(d time.Duration) { socketCheck = d }(socketCheck)
+	socketCheck = 200 * time.Millisecond
+
+	dial := func(token string) *fws.Conn {
+		c, _, err := fws.DefaultDialer.Dial("ws://"+ln.Addr().String()+"/pay/ws", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.WriteJSON(map[string]string{"token": token})
+		return c
+	}
+	read := func(c *fws.Conn) (map[string]any, error) {
+		c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		var m map[string]any
+		return m, c.ReadJSON(&m)
+	}
+	if _, err := read(dial(fx.tokens["auditor"])); !fws.IsCloseError(err, 4001) {
+		t.Errorf("el auditor no ve la agenda: %v", err)
+	}
+	if _, err := read(dial("noexiste")); !fws.IsCloseError(err, 4001) {
+		t.Errorf("token inválido: %v", err)
+	}
+	c := dial(fx.tokens["recepcion"])
+	if m, err := read(c); err != nil || m["type"] != "ready" {
+		t.Fatalf("conexión: %v %v", m, err)
+	}
+	// esperar a que el servicio esté escuchando antes de publicar (pg_notify no guarda avisos)
+	for i := 0; ; i++ {
+		var ok bool
+		a.db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND query = 'LISTEN agenda')`).Scan(&ok)
+		if ok {
+			break
+		}
+		if i == 50 {
+			t.Fatal("el servicio no empezó a escuchar el canal agenda")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if _, err := a.db.Exec(ctx, `SELECT pg_notify('agenda', $1)`, fmt.Sprintf(`{"clinic": %d}`, fx.clinic)); err != nil {
+		t.Fatal(err)
+	}
+	if m, err := read(c); err != nil || m["type"] != "agenda" {
+		t.Fatalf("aviso de agenda: %v %v", m, err)
+	}
+	// RNF-05: la agenda abierta no mantiene viva una sesión inactiva
+	exec(t, a, `UPDATE clinica_user u SET last_activity = now() - interval '16 minutes' FROM authtoken_token k
+		WHERE k.user_id = u.id AND k.key = $1 RETURNING u.id`, fx.tokens["recepcion"])
+	if _, err := read(c); !fws.IsCloseError(err, 4001) {
+		t.Errorf("sesión inactiva sigue conectada: %v", err)
+	}
+	if s, _ := call(t, f, "GET", "/pay/ws", "", nil); s != 426 {
+		t.Errorf("GET sin upgrade: %d", s)
 	}
 }

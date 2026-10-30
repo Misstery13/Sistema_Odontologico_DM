@@ -63,6 +63,18 @@ paths:
       responses:
         "200": { description: OK }
         "503": { description: Base de datos no disponible }
+  /ws:
+    get:
+      summary: Agenda en vivo (WebSocket)
+      description: |
+        Roles: recepcion, odontologo, asistente. Tras el upgrade, el cliente envía `{"token": "<token>"}` como primer
+        mensaje (antes de 10 s). El servidor responde `{"type": "ready"}` y luego `{"type": "agenda"}` cada vez que cambia
+        una cita de su clínica; el aviso no trae datos y la agenda se vuelve a pedir a `/api/appointments/`.
+        Cierra con el código 4001 si la sesión es inválida, el rol no ve la agenda o la sesión pasa 15 min inactiva.
+      security: []
+      responses:
+        "101": { description: Conexión WebSocket establecida }
+        "426": { description: La petición no es un upgrade a WebSocket }
   /patients/{id}/balance:
     get:
       summary: Saldo pendiente del paciente (tratamientos − pagos)

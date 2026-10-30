@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import json
 import uuid
 from datetime import date, timedelta
 from decimal import Decimal
@@ -8,7 +9,7 @@ from django.conf import settings
 from django.contrib.auth.models import AbstractUser
 from django.core.exceptions import PermissionDenied
 from django.core.validators import MaxValueValidator, MinValueValidator
-from django.db import models
+from django.db import connection, models
 from django.utils import timezone
 
 # Numeración FDI: permanentes cuadrantes 1-4, piezas 1-8 (11..48); temporales cuadrantes 5-8, piezas 1-5 (51..85)
@@ -144,6 +145,14 @@ class Appointment(models.Model):
 
     class Meta:
         ordering = ["start"]
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        # agenda en vivo: PostgreSQL entrega el aviso al confirmar la transacción y el servicio de caja (Go) lo
+        # reenvía por WebSocket a las pantallas de la clínica. Solo va el id de la clínica, ningún dato del paciente.
+        if connection.vendor == "postgresql":
+            with connection.cursor() as cur:
+                cur.execute("SELECT pg_notify('agenda', %s)", [json.dumps({"clinic": self.clinic_id})])
 
 
 class Tooth(models.Model):

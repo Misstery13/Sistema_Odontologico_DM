@@ -8,7 +8,7 @@ Sistema de gestión odontológica multitenant (proyecto de la asignatura *Framew
 |---|---|---|
 | `caddy` | Caddy 2 + SPA React/Vite/Tailwind (`frontend/`) | Proxy: `/api/*` → backend, `/pay/*` → payments. Configs: `Caddyfile` (dev), `Caddyfile.prod` (dominio propio, TLS 1.3), `Caddyfile.funnel` (detrás de Tailscale Funnel); comparten `common.caddy` |
 | `backend` | Django 5.2 + DRF (`backend/`) | Clínico, agenda, inventario, usuarios, auditoría. Migraciones al arrancar. `seed` solo fuera de producción o con `SEED_DEMO=1` |
-| `payments` | Go 1.26 + Fiber (`payments/`) | Cobros, comprobantes, anulaciones, cierre de caja ciego. Lee tablas de Django en la misma base |
+| `payments` | Go 1.26 + Fiber (`payments/`) | Cobros, comprobantes, anulaciones, cierre de caja ciego y WebSocket de la agenda en vivo (`/pay/ws`, escucha `pg_notify` de Django). Lee tablas de Django en la misma base |
 | `reminders` | mismo contenedor que backend | Recordatorios cada 15 min (adaptador simulado) |
 | `db`, `redis` | PostgreSQL 16, Redis 7 | Sin puertos publicados |
 | `backup`, `monitor` | solo en `docker-compose.prod.yml` | Respaldo diario en `./backups`; Uptime Kuma en `127.0.0.1:3001` |
@@ -25,7 +25,7 @@ Guía completa: **`docs/despliegue/tailscale-funnel.md`**. El camino normal es:
    - Si es clínica real: nombre de la clínica y número de sillones/consultorios.
 3. Ejecutar `./scripts/desplegar-funnel.sh`. Es idempotente; para cambiar `SEED_DEMO`, editar `.env.funnel` y volver a ejecutarlo.
 4. Si es clínica real, crear la clínica con `nueva_clinica` y pedir al usuario que ejecute él mismo `manage.py usuario ... admin` (la contraseña se teclea de forma interactiva; sugerirle anteponer `!` en el prompt).
-5. Entregar al usuario la URL pública que imprime el script y verificar `GET <url>/api/health/` y `GET <url>/pay/health`.
+5. Entregar al usuario la URL pública que imprime el script y verificar `GET <url>/api/health/` y `GET <url>/pay/health`. En la agenda debe verse el indicador «En vivo» (WebSocket a través de Funnel).
 
 ## Reglas para operar el servidor
 
