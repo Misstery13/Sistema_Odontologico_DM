@@ -25,7 +25,7 @@ from . import mfa
 from .auth import RolePermission
 from .models import (
     Appointment, AuditLog, Chair, ClinicalNote, Consent, ConsentTemplate, Patient, PerioExam, Prescription, Tooth,
-    Treatment, User, sign, Budget, BudgetItem, CommissionRule, Procedure, StockMovement, Supply, Attachment, VitalSigns,
+    Treatment, User, sign, Budget, BudgetItem, CommissionRule, Procedure, StockMovement, Supply, Attachment, VitalSigns, ToothEvent,
 )
 from .notify import notify, send
 from .serializers import (
@@ -100,7 +100,7 @@ class TenantViewSet(viewsets.ModelViewSet):
 class PatientViewSet(TenantViewSet):
     model = Patient
     resource = "patients"
-    action_resources = {"odontogram": "odontogram"}
+    action_resources = {"odontogram": "odontogram", "odontogram_history": "odontogram"}
     audited = True
     serializer_class = PatientSerializer
     http_method_names = ["get", "post", "patch", "head", "options"]
@@ -114,18 +114,39 @@ class PatientViewSet(TenantViewSet):
 
     @action(detail=True, methods=["get", "post"])
     def odontogram(self, request, pk=None):
+        """Estado actual; con ?at=AAAA-MM-DD, el odontograma tal como estaba al final de ese día."""
         patient = self.get_object()
         if request.method == "POST":
             s = ToothSerializer(data=request.data)
             s.is_valid(raise_exception=True)
             v = s.validated_data
-            Tooth.objects.update_or_create(
-                patient=patient,
-                number=v["number"],
-                defaults={"state": v.get("state", "sano"), "surfaces": v.get("surfaces", {}), "clinic_id": patient.clinic_id},
-            )
+            state, surfaces = v.get("state", "sano"), v.get("surfaces", {})
+            with transaction.atomic():
+                Tooth.objects.update_or_create(
+                    patient=patient, number=v["number"], defaults={"state": state, "surfaces": surfaces, "clinic_id": patient.clinic_id},
+                )
+                ToothEvent.objects.create(clinic_id=patient.clinic_id, patient=patient, number=v["number"], state=state,
+                                          surfaces=surfaces, user=request.user)
         audit(request, "update" if request.method == "POST" else "read", "Tooth", patient.pk)
+        at = request.query_params.get("at")
+        if request.method == "GET" and at:
+            latest = {}
+            for e in patient.tooth_events.filter(created_at__date__lte=at):  # orden cronológico: gana el último
+                latest[e.number] = {"number": e.number, "state": e.state, "surfaces": e.surfaces}
+            return Response(sorted(latest.values(), key=lambda t: t["number"]))
         return Response(ToothSerializer(patient.teeth.all(), many=True).data)
+
+    @action(detail=True, url_path="odontogram-history")
+    def odontogram_history(self, request, pk=None):
+        """Cambios del odontograma, del más reciente al más antiguo."""
+        patient = self.get_object()
+        audit(request, "read", "Tooth", patient.pk)
+        events = patient.tooth_events.select_related("user").order_by("-created_at", "-id")[:500]
+        return Response([
+            {"number": e.number, "state": e.state, "surfaces": e.surfaces, "created_at": e.created_at,
+             "user": (e.user.get_full_name() or e.user.username) if e.user else None}
+            for e in events
+        ])
 
 
 class ChairViewSet(TenantViewSet):
@@ -156,6 +177,12 @@ class AppointmentViewSet(TenantViewSet):
     def perform_create(self, serializer):
         notify(super().perform_create(serializer), "confirmacion")
 
+    def perform_update(self, serializer):
+        before = serializer.instance.start
+        appt = serializer.save()
+        if appt.start != before and appt.status not in Appointment.INACTIVE:
+            notify(appt, "reprogramacion")
+
 
 def consume_supplies(treatment, user):
     """RF-14: descarga los insumos de la receta estándar del procedimiento; devuelve el costo de materiales.
@@ -178,6 +205,22 @@ class TreatmentViewSet(TenantViewSet):
 
     def get_queryset(self):
         return super().get_queryset().select_related("dentist")
+
+    @action(detail=True, methods=["post"])
+    def void(self, request, pk=None):
+        """RN-01: un tratamiento registrado por error se anula con justificación; no se borra ni se edita.
+        Deja de sumar al saldo y a los honorarios; su ítem de presupuesto vuelve a quedar pendiente.
+        Los insumos ya consumidos no se reponen (si no se usaron, se corrige con un ajuste de inventario)."""
+        t = self.get_object()
+        reason = str(request.data.get("reason", "")).strip()
+        if t.voided:
+            raise ValidationError("El tratamiento ya está anulado")
+        if len(reason) < 10:
+            raise ValidationError({"reason": "Explica el motivo de la anulación (mínimo 10 caracteres)"})
+        t.voided, t.void_reason, t.voided_by, t.voided_at = True, reason, request.user, timezone.now()
+        t.save(update_fields=["voided", "void_reason", "voided_by", "voided_at"])
+        audit(request, "update", "Treatment", t.pk)
+        return Response(self.get_serializer(t).data)
 
     @transaction.atomic
     def perform_create(self, serializer):
@@ -408,7 +451,7 @@ class BudgetViewSet(TenantViewSet):
     http_method_names = ["get", "post", "head", "options"]  # un presupuesto emitido no se edita: se emite otro
 
     def get_queryset(self):
-        return super().get_queryset().select_related("author").prefetch_related("items__procedure", "items__appointments")
+        return super().get_queryset().select_related("author").prefetch_related("items__procedure", "items__appointments", "items__treatments")
 
     def perform_create(self, serializer):
         obj = serializer.save(clinic_id=self.request.tenant, author=self.request.user)
@@ -437,8 +480,8 @@ class BudgetViewSet(TenantViewSet):
     def pending(self, request):
         """Ítems aprobados y aún no realizados del paciente: tareas para agendar o registrar."""
         items = BudgetItem.objects.filter(
-            budget__clinic_id=request.tenant, budget__patient_id=request.query_params.get("patient"), approved=True, treatment__isnull=True
-        ).select_related("procedure", "budget").prefetch_related("appointments")
+            budget__clinic_id=request.tenant, budget__patient_id=request.query_params.get("patient"), approved=True
+        ).exclude(treatments__voided=False).select_related("procedure", "budget").prefetch_related("appointments", "treatments")
         return Response(BudgetItemSerializer(items, many=True).data)
 
 
@@ -460,7 +503,7 @@ def reports(request):
     if not start or not end:
         raise ValidationError("Indica el rango ?from=AAAA-MM-DD&to=AAAA-MM-DD")
     tenant = request.tenant
-    treatments = Treatment.objects.filter(clinic_id=tenant, date__gte=start, date__lte=end).select_related("dentist")
+    treatments = Treatment.objects.filter(clinic_id=tenant, date__gte=start, date__lte=end, voided=False).select_related("dentist")
     rules = {r.dentist_id: r for r in CommissionRule.objects.filter(clinic_id=tenant)}
     by_dentist = {}
     for t in treatments:

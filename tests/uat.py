@@ -116,11 +116,18 @@ def main():
     check("RN-03", "mismo sillón con otro odontólogo rechazado", s == 400 and "sillón" in str(err), err)
     s, a2, _ = call("PATCH", f"/api/appointments/{a['id']}/", AS, {"status": "en_espera"})
     check("RF-10", "estado 'en sala de espera'", s == 200 and a2["status"] == "en_espera", a2)
+    moved = (date.fromisoformat(start[:10]) + timedelta(days=1)).isoformat() + "T11:30"
+    s, a3, _ = call("PATCH", f"/api/appointments/{a['id']}/", R, {"start": moved})
+    check("Agenda", "reprogramar una cita (fecha y hora)", s == 200 and a3["start"].startswith(moved), a3)
 
     # --- RF-03: odontograma ---
     s, teeth, _ = call("POST", f"/api/patients/{pid}/odontogram/", D, {"number": 36, "state": "endodoncia_requerida", "surfaces": {"O": "caries", "M": "caries"}})
     check("RF-03", "hallazgos por superficie y pieza", s == 200 and teeth[0]["surfaces"] == {"O": "caries", "M": "caries"}, teeth)
     check("RF-03", "dentición temporal", call("POST", f"/api/patients/{pid}/odontogram/", D, {"number": 54, "state": "extraido", "surfaces": {}})[0] == 200)
+    hist = call("GET", f"/api/patients/{pid}/odontogram-history/", D)[1]
+    check("RF-03", "historial del odontograma con autor", len(hist) == 2 and hist[0]["number"] == 54 and hist[0]["user"] == "Ana López", hist)
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    check("RF-03", "odontograma en una fecha pasada", call("GET", f"/api/patients/{pid}/odontogram/?at={yesterday}", D)[1] == [])
 
     # --- RF-07/08 + RF-14: presupuesto → aprobación → tratamiento con descargo ---
     catalog = {p["code"]: p for p in call("GET", "/api/procedures/", D)[1]}
@@ -147,6 +154,12 @@ def main():
     s, tr2, _ = call("POST", "/api/treatments/", D, {"patient": pid, "catalog": catalog["PROF"]["id"], "chair": chairs[0]["id"], "date": date.today().isoformat()})
     check("2.2", "el procedimiento descarga del consultorio donde se hizo", s == 201 and tr2["chair"] == chairs[0]["id"], tr2)
     check("RN-01", "lo realizado no se borra", call("DELETE", f"/api/treatments/{tr['id']}/", D)[0] == 405)
+    bal_before = call("GET", f"/pay/patients/{pid}/balance", R)[1]["balance"]
+    s, wrong, _ = call("POST", "/api/treatments/", D, {"patient": pid, "catalog": catalog["PROF"]["id"], "date": date.today().isoformat()})
+    check("RN-01", "anular exige motivo", call("POST", f"/api/treatments/{wrong['id']}/void/", D, {"reason": "error"})[0] == 400)
+    s, vt, _ = call("POST", f"/api/treatments/{wrong['id']}/void/", D, {"reason": "Registrado en el paciente equivocado"})
+    bal_after = call("GET", f"/pay/patients/{pid}/balance", R)[1]["balance"]
+    check("RN-01", "tratamiento anulado con motivo deja de sumar al saldo", s == 200 and vt["voided"] and bal_after == bal_before, (vt, bal_before, bal_after))
 
     # --- RF-12, RN-02: caja ---
     bal = call("GET", f"/pay/patients/{pid}/balance", R)[1]["balance"]
@@ -156,6 +169,10 @@ def main():
     check("RF-12", "comprobante exige datos del comprador", call("POST", "/pay/payments", R, {"patient_id": pid, "amount": 1, "method": "efectivo", "buyer_id": "12", "buyer_name": "X"})[0] == 400)
     s, rec, _ = call("GET", f"/pay/payments/{pay['id']}/receipt", R)
     check("RF-12", "comprobante imprimible con comprador e IVA 0 %", s == 200 and rec["payment"]["buyer_id"] == "0912345678" and rec["tax"]["iva_rate"] == 0, rec)
+    s, pv, _ = call("POST", "/pay/payments", R, {"patient_id": pid, "amount": 1, "method": "efectivo", "buyer_id": "0912345678", "buyer_name": "Lucía Prueba"})
+    s, voided, _ = call("POST", f"/pay/payments/{pv['id']}/void", R, {"reason": "Monto digitado por error"})
+    check("RN-01", "anular un cobro emite nota de crédito (o se impide si la caja del día ya cerró)",
+          (s == 200 and voided["credit_note"].startswith("NC-")) or (s == 409 and "cerrada" in voided["detail"]), voided)
     check("RF-12", "odontólogo no cobra", call("POST", "/pay/payments", D, {"patient_id": pid, "amount": 1, "method": "efectivo", "buyer_id": "0912345678", "buyer_name": "Lucía Prueba"})[0] == 403)
     check("RN-02", "recepción no ve totales de caja", call("GET", "/pay/cash-closings", R)[0] == 403)
     s, closing, _ = call("POST", "/pay/cash-closings", R, {"counted": 0})

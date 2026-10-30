@@ -21,9 +21,16 @@ export default function PatientDetail() {
   const [error, setError] = useState("");
   const [rev, setRev] = useState(0); // se incrementa al registrar un tratamiento para refrescar el saldo
   const [planRev, setPlanRev] = useState(0); // se incrementa al decidir un presupuesto para refrescar "Por tratar"
+  const [vitalAlerts, setVitalAlerts] = useState([]);
 
   useEffect(() => {
     api(`/api/patients/${id}/`).then(setPatient).catch((e) => setError(e.message));
+    // signos vitales tomados hoy con valores de riesgo: se muestran junto a las alergias
+    if (is("odontologo", "asistente"))
+      api(`/api/vitals/?patient=${id}`).then((list) => {
+        const today = list.find((v) => new Date(v.created_at).toDateString() === new Date().toDateString());
+        setVitalAlerts(today ? today.alerts.map((a) => `${a} (${today.systolic}/${today.diastolic})`) : []);
+      });
   }, [id]);
 
   const save = async (data) => {
@@ -44,9 +51,9 @@ export default function PatientDetail() {
     );
   return (
     <div className="space-y-6">
-      {patient.alerts.length > 0 && (
+      {patient.alerts.length + vitalAlerts.length > 0 && (
         <div role="alert" className="flex flex-wrap items-center gap-2">
-          {patient.alerts.map((a) => (
+          {[...patient.alerts, ...vitalAlerts].map((a) => (
             <span key={a} className="inline-flex items-center gap-2 rounded-[3px] bg-red px-3 py-1.5 text-sm font-semibold uppercase tracking-[0.06em] text-white">
               <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M12 3l10 18H2L12 3z" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinejoin="round" />
@@ -207,18 +214,21 @@ function Treatments({ patientId, teeth, planRev, onChange }) {
       )}
       <h3 className="label mt-6 flex justify-between border-b-2 border-print pb-1">
         <span>Realizado</span>
-        <span>{money(items.reduce((s, t) => s + Number(t.cost), 0))}</span>
+        <span>{money(items.filter((t) => !t.voided).reduce((s, t) => s + Number(t.cost), 0))}</span>
       </h3>
       <ul>
         {items.map((t) => (
           <li key={t.id} className="rule-row py-1.5">
-            <div className={`flex justify-between gap-3 ${t.id === fresh ? "write-in" : ""}`}>
-              <span className="text-pen"><span className="text-pencil">{fmtDate(t.date)}</span> · {t.procedure}{t.tooth && ` · pieza ${t.tooth}`}</span>
-              <span className="font-medium text-pen">{money(t.cost)}</span>
+            <div className={`flex justify-between gap-3 ${t.id === fresh ? "write-in" : ""} ${t.voided ? "text-pencil line-through decoration-red" : ""}`}>
+              <span className={t.voided ? "" : "text-pen"}><span className="text-pencil">{fmtDate(t.date)}</span> · {t.procedure}{t.tooth && ` · pieza ${t.tooth}`}</span>
+              <span className={`font-medium ${t.voided ? "" : "text-pen"}`}>{money(t.cost)}</span>
             </div>
             {(t.dentist_name || t.notes) && (
               <p className="text-sm text-pencil">{t.dentist_name}{t.notes && <span className="hand text-base text-pen"> · {t.notes}</span>}</p>
             )}
+            {t.voided
+              ? <p className="text-sm font-medium text-red">Anulado por {t.voided_by_name}: {t.void_reason}</p>
+              : is("odontologo") && <VoidAction label="Anular" onVoid={(reason) => api(`/api/treatments/${t.id}/void/`, { method: "POST", body: { reason } }).then(() => { load(); onChange(); })} />}
           </li>
         ))}
         {!items.length && <li className="py-2 text-sm text-pencil">Sin tratamientos registrados.</li>}
@@ -259,6 +269,25 @@ function Treatments({ patientId, teeth, planRev, onChange }) {
   );
 }
 
+// RN-01: corregir un registro es anularlo con un motivo; nunca se borra
+function VoidAction({ label, onVoid }) {
+  const [open, setOpen] = useState(false);
+  const [error, setError] = useState("");
+  const submit = formSubmit(async ({ reason }) => {
+    await onVoid(reason);
+    setOpen(false);
+  }, setError);
+  if (!open) return <button onClick={() => setOpen(true)} className="text-xs font-medium text-red hover:underline">{label}</button>;
+  return (
+    <form onSubmit={submit} className="mt-1 flex flex-wrap items-end gap-2">
+      <input name="reason" className="field flex-1 text-sm" placeholder="Motivo de la anulación" minLength={10} required aria-label="Motivo de la anulación" />
+      <button className="rounded-[3px] bg-red px-3 py-1 text-xs font-semibold uppercase tracking-[0.06em] text-white">Confirmar</button>
+      <button type="button" onClick={() => setOpen(false)} className="link text-xs">Cancelar</button>
+      {error && <p className="error w-full" role="alert">{error}</p>}
+    </form>
+  );
+}
+
 export const METHODS = {
   efectivo: "Efectivo",
   tarjeta_credito: "Tarjeta de crédito",
@@ -286,6 +315,7 @@ function Receipt({ id }) {
           <span className="label">Comprobante de venta</span>
         </div>
         <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1">
+          {p.voided && <dd className="col-span-2 border-2 border-red py-1 text-center font-bold uppercase tracking-[0.2em] text-red">Anulado · {p.credit_note}</dd>}
           <dt className="label">Número</dt><dd className="text-right font-semibold text-pen">{p.invoice_number}</dd>
           <dt className="label">Fecha</dt><dd className="text-right text-pen">{new Date(p.created_at).toLocaleString("es-EC")}</dd>
           <dt className="label">Cliente</dt><dd className="text-right text-pen">{p.buyer_name}</dd>
@@ -333,7 +363,7 @@ function Payments({ patient, rev }) {
     setOpen(p.id);
     load();
   }, setError);
-  const paid = items.reduce((s, p) => s + p.amount, 0);
+  const paid = items.filter((p) => !p.voided).reduce((s, p) => s + p.amount, 0);
 
   return (
     <Panel title="Caja">
@@ -373,10 +403,14 @@ function Payments({ patient, rev }) {
       <ul>
         {items.map((p) => (
           <li key={p.id} className="rule-row py-1.5">
-            <div className={`flex justify-between ${p.id === fresh ? "write-in" : ""}`}>
-              <span className="text-pen"><span className="text-pencil">{new Date(p.created_at).toLocaleDateString("es-EC")}</span> · {METHODS[p.method] || p.method}</span>
-              <span className="font-medium text-pen">{money(p.amount)}</span>
+            <div className={`flex justify-between ${p.id === fresh ? "write-in" : ""} ${p.voided ? "text-pencil line-through decoration-red" : ""}`}>
+              <span className={p.voided ? "" : "text-pen"}><span className="text-pencil">{new Date(p.created_at).toLocaleDateString("es-EC")}</span> · {METHODS[p.method] || p.method}</span>
+              <span className={`font-medium ${p.voided ? "" : "text-pen"}`}>{money(p.amount)}</span>
             </div>
+            {p.voided && <p className="text-xs font-medium text-red">Anulado · nota de crédito {p.credit_note} · {p.void_reason}</p>}
+            {!p.voided && is("recepcion") && (
+              <VoidAction label="Anular cobro" onVoid={(reason) => api(`/pay/payments/${p.id}/void`, { method: "POST", body: { reason } }).then(load)} />
+            )}
             <p className="flex justify-between text-xs text-pencil">
               <span>Comprobante {p.invoice_number || "—"}{p.authorization && ` · autorización ${p.authorization}`}</span>
               {p.buyer_id && <button onClick={() => setOpen(open === p.id ? null : p.id)} className="link text-xs">{open === p.id ? "Ocultar" : "Ver comprobante"}</button>}

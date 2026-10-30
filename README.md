@@ -31,12 +31,12 @@ Requisitos en `docs/Documento de Requerimientos de Software - Sistema Odontológ
 |---|---|
 | RF-01 | Ficha única: datos, contacto de emergencia, tutor legal (obligatorio si es menor), seguro; alta y edición |
 | RF-02 | Anamnesis obligatoria; badge rojo en la cabecera del expediente (alergias, anticoagulado, coagulopatía) |
-| RF-03 | Odontograma SVG: dentición permanente (32) y temporal (20), notación FDI o Universal, 5 superficies (M, D, O/I, V, L/P); caries, restauración, sellante por superficie; endodoncia requerida/realizada, implante, prótesis fija/removible, exodoncia indicada/realizada por pieza. Lo rojo alimenta la lista "Por tratar" |
+| RF-03 | Odontograma SVG: dentición permanente (32) y temporal (20), notación FDI o Universal, 5 superficies (M, D, O/I, V, L/P); caries, restauración, sellante por superficie; endodoncia requerida/realizada, implante, prótesis fija/removible, exodoncia indicada/realizada por pieza. Lo rojo alimenta la lista "Por tratar". **Historial**: cada cambio queda registrado con autor y fecha, y se puede ver el odontograma tal como estaba en cualquier fecha |
 | RF-04 | Periodontograma: PS y margen gingival en 6 sitios, sangrado, movilidad, furca; NIC = PS + MG; resumen (% sangrado, bolsas ≥ 4 mm, NIC promedio); firmado e inmutable |
 | Recetas | Receta firmada e imprimible; bloquea medicamentos que cruzan con alergias registradas (p. ej. penicilina → amoxicilina) salvo justificación |
 | RF-06 | Consentimiento por procedimiento desde catálogo; firma en pantalla táctil (canvas) o por código OTP (6 dígitos, 10 min, 5 intentos; envío **simulado**, ver `docker compose logs backend`); se firma una vez e imprime |
-| RF-05 / RN-01 | Notas SOEP firmadas (HMAC), editables solo por su autor durante 24 h (`NOTE_LOCK_HOURS`), luego adendas; tratamientos y notas no se borran |
-| RF-09 | Agenda día/semana filtrable por sillón y odontólogo |
+| RF-05 / RN-01 | Notas SOEP firmadas (HMAC), editables solo por su autor durante 24 h (`NOTE_LOCK_HOURS`), luego adendas. Nada se borra: un tratamiento o un cobro erróneo se **anula con motivo** (el cobro con nota de crédito; no se permite si la caja de ese día ya se cerró), deja de contar en saldo, honorarios y caja, y queda visible tachado |
+| RF-09 | Agenda día/semana filtrable por consultorio y odontólogo; **reprogramación** (fecha, hora, consultorio, odontólogo) con validación de choques y aviso al paciente |
 | RF-10 | Estados: programado, confirmado, en sala de espera, en atención, atendido, cancelado, no asistió |
 | RF-11 | Confirmación al agendar y recordatorios 48 h/24 h (servicio `reminders`; adaptador **simulado**, ver `docker compose logs reminders`) |
 | RF-07 | Presupuestos por fases desde el catálogo (honorario + laboratorio), con descuento autorizado hasta `MAX_DISCOUNT_PCT` (15 %); un presupuesto emitido no se edita |
@@ -45,7 +45,7 @@ Requisitos en `docs/Documento de Requerimientos de Software - Sistema Odontológ
 | RF-13 | Liquidación de honorarios por odontólogo: % del precio, monto fijo, o % tras laboratorio y materiales |
 | RF-14 / 2.2 | Inventario por ubicación (bodega central y cada consultorio), traslados, compras y ajustes; el procedimiento descarga la receta estándar del consultorio donde se hizo; consumo por consultorio y por profesional en Reportes; kardex inmutable; alerta de stock bajo |
 | 2.3 / 7 | Archivos del expediente: radiografías, fotos clínicas y PDF (hasta 15 MB); se valida el tipo real del contenido, se guarda su SHA-256, no se borran y cada consulta o descarga pasa por permisos y auditoría |
-| Signos vitales | Presión, pulso, respiración, temperatura, SpO₂ y glucemia, con alertas clínicas (crisis hipertensiva, saturación baja, fiebre…) |
+| Signos vitales | Presión, pulso, respiración, temperatura, SpO₂ y glucemia, con alertas clínicas (crisis hipertensiva, saturación baja, fiebre…); las del día aparecen en la cabecera de la ficha junto a las alergias |
 | Reportes | Producción, honorarios, procedimientos, ingresos por método, citas por estado y ausentismo, pacientes nuevos, consumo de insumos |
 | RN-02 | Cierre de caja ciego: el total del sistema solo se muestra después de registrar el conteo |
 | RN-03 | No se agendan dos citas a la vez en el mismo sillón ni con el mismo odontólogo |
@@ -63,13 +63,13 @@ Pendientes: cifrado en reposo a nivel de aplicación (se delega al disco cifrado
 
 | Entregable | Dónde |
 |---|---|
-| Pruebas de aceptación (62 criterios, contra el sistema desplegado) | `python tests/uat.py [url]` |
+| Pruebas de aceptación (68 criterios, contra el sistema desplegado) | `python tests/uat.py [url]` |
 | Prueba de carga (150 usuarios concurrentes) | `python tests/load.py [url] [usuarios] [segundos]` |
 | Pruebas de navegador (Chromium, Firefox, WebKit; escritorio, laptop, iPad) | `cd tests/e2e && npm i && npx playwright install && npx playwright test` |
-| Tests Django (32 tests, cobertura 89 %) | `cd backend && coverage run manage.py test` |
+| Tests Django (35 tests, cobertura 89 %) | `cd backend && coverage run manage.py test` |
 | Tests de integración Go (cobertura 85,3 %) | `sh scripts/test-payments.sh` (con el stack levantado) |
 | SAST, auditoría de dependencias y DAST (OWASP ZAP) | CI y `docker compose --profile zap run --rm zap`; informe en [docs/seguridad/INFORME.md](docs/seguridad/INFORME.md) |
-| CI en cada push (tests, cobertura ≥ 80 %, auditorías) | `.github/workflows/ci.yml` |
+| CI en cada push: tests, cobertura ≥ 80 %, auditorías y, con el sistema levantado en Docker, UAT, carga y navegadores | `.github/workflows/ci.yml` |
 | Producción: TLS 1.3, HSTS, secretos obligatorios, healthchecks, backups diarios | `docker-compose.prod.yml`, `frontend/Caddyfile.prod`, [docs/DESPLIEGUE.md](docs/DESPLIEGUE.md) |
 
 ### Roles demo (contraseña `odonto123`)
@@ -108,7 +108,7 @@ Las integraciones que necesitan cuentas o certificados reales funcionan con **ad
 ```bash
 cd backend && python -m venv .venv && .venv/Scripts/pip install -r requirements.txt
 .venv/Scripts/python manage.py migrate && .venv/Scripts/python manage.py seed
-.venv/Scripts/python manage.py test        # 32 tests de reglas de negocio, RBAC, MFA, usuarios, archivos, inventario y aislamiento
+.venv/Scripts/python manage.py test        # 35 tests de reglas de negocio, RBAC, MFA, usuarios, archivos, inventario y aislamiento
 .venv/Scripts/python manage.py runserver
 cd frontend && npm install && npm run dev  # proxy a :8000 (Django) y :8081 (Go)
 ```

@@ -98,7 +98,10 @@ export default function Odontogram({ patientId, teeth, setTeeth }) {
   const [notation, setNotation] = useState("fdi");
   const [brush, setBrush] = useState({ kind: "surface", value: "caries" });
   const [error, setError] = useState("");
-  const canEdit = is("odontologo");
+  const [at, setAt] = useState(""); // fecha pasada a consultar (vacío = estado actual)
+  const [past, setPast] = useState({});
+  const [history, setHistory] = useState(null);
+  const canEdit = is("odontologo") && !at; // el odontograma de una fecha pasada es de solo lectura
   const url = `/api/patients/${patientId}/odontogram/`;
   const apply = (list) => setTeeth(Object.fromEntries(list.map((t) => [t.number, t])));
 
@@ -147,11 +150,41 @@ export default function Odontogram({ patientId, teeth, setTeeth }) {
     <section className="sheet">
       <div className="flex flex-wrap items-center gap-3 border-b-2 border-print px-5 py-4">
         <h2 className="text-xl font-semibold">Odontograma</h2>
+        <label className="flex items-center gap-2 text-sm">
+          <span className="label">Ver al</span>
+          <input type="date" className="field w-40" value={at} max={new Date().toLocaleDateString("sv")}
+            onChange={(e) => {
+              setAt(e.target.value);
+              if (e.target.value) api(`${url}?at=${e.target.value}`).then((l) => setPast(Object.fromEntries(l.map((t) => [t.number, t]))));
+            }} />
+          {at && <button onClick={() => setAt("")} className="link">Hoy</button>}
+        </label>
+        <button onClick={() => (history ? setHistory(null) : api(`/api/patients/${patientId}/odontogram-history/`).then(setHistory))} className="link">
+          {history ? "Ocultar historial" : "Historial de cambios"}
+        </button>
         <div className="ml-auto flex flex-wrap gap-3">
           {toggle(dentition, setDentition, [["permanente", "Permanente"], ["temporal", "Temporal"]])}
           {toggle(notation, setNotation, [["fdi", "FDI"], ["universal", "Universal"]])}
         </div>
       </div>
+      {at && (
+        <p className="border-b border-rule bg-rule/40 px-5 py-2 text-sm font-medium text-pen">
+          Odontograma al {new Date(`${at}T12:00`).toLocaleDateString("es-EC", { day: "numeric", month: "long", year: "numeric" })} (solo lectura)
+        </p>
+      )}
+      {history && (
+        <ol className="max-h-56 overflow-auto border-b border-rule px-5 py-3 text-sm">
+          {history.map((h, k) => (
+            <li key={k} className="rule-row flex flex-wrap gap-x-3 py-1">
+              <span className="text-pencil">{new Date(h.created_at).toLocaleString("es-EC")}</span>
+              <span className="font-medium text-pen">Pieza {h.number}</span>
+              <span className="text-pen">{TOOTH_STATES[h.state]}{Object.keys(h.surfaces).length > 0 && ` · ${Object.entries(h.surfaces).map(([sf, v]) => `${sf} ${SURFACE_BRUSHES[v].toLowerCase()}`).join(", ")}`}</span>
+              <span className="text-pencil">{h.user || "estado inicial"}</span>
+            </li>
+          ))}
+          {!history.length && <li className="text-pencil">Sin cambios registrados.</li>}
+        </ol>
+      )}
       {canEdit && (
         <div className="space-y-2 border-b border-rule px-5 py-3">
           <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Hallazgo por superficie">
@@ -171,7 +204,7 @@ export default function Odontogram({ patientId, teeth, setTeeth }) {
             ? "max-w-[620px] min-w-[360px] grid-cols-[repeat(5,minmax(0,1fr))_14px_repeat(5,minmax(0,1fr))]"
             : "max-w-[1000px] min-w-[560px] grid-cols-[repeat(8,minmax(0,1fr))_14px_repeat(8,minmax(0,1fr))]"} ${i ? "mt-3 border-t border-print pt-3" : ""}`}>
             {row.map((n, j) => {
-              const t = teeth[n];
+              const t = (at ? past : teeth)[n];
               const label = notation === "fdi" ? n : universal(n);
               const findings = Object.entries(t?.surfaces || {}).map(([s, v]) => `${SURFACE_NAMES[s]} ${SURFACE_BRUSHES[v].toLowerCase()}`);
               return (

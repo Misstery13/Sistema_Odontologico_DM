@@ -186,7 +186,12 @@ class Treatment(models.Model):
     chair = models.ForeignKey(Chair, null=True, blank=True, on_delete=models.PROTECT, related_name="treatments")
     lab_cost = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     material_cost = models.DecimalField(max_digits=10, decimal_places=2, default=0)  # según receta de consumo
-    budget_item = models.OneToOneField("BudgetItem", null=True, blank=True, on_delete=models.PROTECT, related_name="treatment")
+    budget_item = models.ForeignKey("BudgetItem", null=True, blank=True, on_delete=models.PROTECT, related_name="treatments")
+    # RN-01: un registro erróneo no se borra; se anula con justificación y queda visible en el historial
+    voided = models.BooleanField(default=False)
+    void_reason = models.CharField(max_length=300, blank=True)
+    voided_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="+")
+    voided_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["-date", "-id"]
@@ -250,18 +255,20 @@ class AuditLog(models.Model):
 class Notification(models.Model):
     """Mensaje transaccional enviado por el adaptador de mensajería (RF-11)."""
 
-    KINDS = [("confirmacion", "Confirmación"), ("recordatorio_48h", "Recordatorio 48h"), ("recordatorio_24h", "Recordatorio 24h")]
+    KINDS = [("confirmacion", "Confirmación"), ("reprogramacion", "Reprogramación"),
+             ("recordatorio_48h", "Recordatorio 48h"), ("recordatorio_24h", "Recordatorio 24h")]
 
     clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE)
     appointment = models.ForeignKey(Appointment, on_delete=models.CASCADE, related_name="notifications")
     kind = models.CharField(max_length=20, choices=KINDS)
+    scheduled_for = models.DateTimeField(null=True)  # horario de la cita al enviar el aviso
     channel = models.CharField(max_length=10)
     recipient = models.CharField(max_length=120)
     message = models.TextField()
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        constraints = [models.UniqueConstraint(fields=["appointment", "kind"], name="one_notification_per_kind")]
+        constraints = [models.UniqueConstraint(fields=["appointment", "kind", "scheduled_for"], name="one_notification_per_kind_and_time")]
 
 
 class PerioExam(models.Model):
@@ -469,7 +476,8 @@ class BudgetItem(models.Model):
     @property
     def net(self):
         """Precio al paciente: honorario + laboratorio, menos el descuento del presupuesto."""
-        return ((self.fee + self.lab_cost) * (1 - self.budget.discount_pct / 100)).quantize(Decimal("0.01"))
+        discount = Decimal(self.budget.discount_pct)  # puede llegar como int (valor por defecto) si no se indicó descuento
+        return ((self.fee + self.lab_cost) * (1 - discount / 100)).quantize(Decimal("0.01"))
 
 
 class CommissionRule(models.Model):
@@ -560,3 +568,21 @@ class Attachment(models.Model):
 
     def delete(self, *args, **kwargs):
         raise PermissionDenied("Los archivos del expediente no se borran (RN-01)")
+
+
+class ToothEvent(models.Model):
+    """Historial del odontograma: cada cambio de una pieza queda registrado y permite verlo en cualquier fecha."""
+
+    clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE)
+    patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="tooth_events")
+    number = models.PositiveSmallIntegerField(choices=ALL_TEETH)
+    state = models.CharField(max_length=20, choices=Tooth.STATES)
+    surfaces = models.JSONField(default=dict, blank=True)
+    user = models.ForeignKey(User, null=True, on_delete=models.PROTECT)  # nulo: estado previo al historial
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["created_at", "id"]
+
+    def delete(self, *args, **kwargs):
+        raise PermissionDenied("El historial clínico no se borra (RN-01)")

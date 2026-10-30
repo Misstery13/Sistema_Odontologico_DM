@@ -22,12 +22,14 @@ def notify(appointment, kind):
     when = timezone.localtime(appointment.start).strftime("%d/%m/%Y %H:%M")
     text = {
         "confirmacion": f"Hola {p.first_name}, tu cita en {appointment.clinic} quedó agendada para el {when}.",
+        "reprogramacion": f"Hola {p.first_name}, tu cita en {appointment.clinic} se cambió al {when}.",
         "recordatorio_48h": f"Hola {p.first_name}, te recordamos tu cita en {appointment.clinic} el {when} (en 2 días).",
         "recordatorio_24h": f"Hola {p.first_name}, te esperamos mañana {when} en {appointment.clinic}.",
     }[kind]
     try:
         with transaction.atomic():  # savepoint: un duplicado no rompe la transacción de la petición
-            Notification.objects.create(clinic=appointment.clinic, appointment=appointment, kind=kind, channel=channel, recipient=recipient, message=text)
+            Notification.objects.create(clinic=appointment.clinic, appointment=appointment, kind=kind, scheduled_for=appointment.start,
+                                        channel=channel, recipient=recipient, message=text)
     except IntegrityError:
         return False
     send(channel, recipient, text)

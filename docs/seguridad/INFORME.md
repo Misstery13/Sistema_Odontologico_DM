@@ -9,7 +9,7 @@ Fecha: 29/10/2026. Alcance: los servicios `backend` (Django), `payments` (Go) y 
 | Cobertura ≥ 80 % en endpoints críticos | **Cumple**: Django 89 %, Go 85,3 % | `coverage report`; `go test -cover` (CI: `.github/workflows/ci.yml`) |
 | DAST/SAST sin severidad Alta o Crítica | **Cumple**: 0 altas, 0 críticas | ZAP (`zap-baseline.html`, `zap-api.html`), bandit, pip-audit, npm audit, govulncheck |
 | Documentación OpenAPI 3 | **Cumple** | `GET /api/schema/` (API clínica) y `GET /pay/openapi.yaml` (caja y facturación) |
-| Pruebas de aceptación (UAT) | **Cumple**: 62/62 criterios | `tests/uat.py` contra el stack desplegado |
+| Pruebas de aceptación (UAT) | **Cumple**: 68/68 criterios | `tests/uat.py` contra el stack desplegado (también en CI) |
 | RNF-01: expediente en menos de 1,5 s | **Cumple**: p95 262 ms con 150 usuarios | `tests/load.py` (ver «Rendimiento») |
 | RNF-03: 150 usuarios concurrentes | **Cumple**: 0 errores en 21.986 peticiones | `tests/load.py` |
 | RNF-05: MFA obligatorio | **Cumple** | TOTP RFC 6238 en el login; tests y UAT |
@@ -19,7 +19,7 @@ Fecha: 29/10/2026. Alcance: los servicios `backend` (Django), `payments` (Go) y 
 
 ## Pruebas automatizadas
 
-- **Django:** 32 tests (archivos: tipo real y descarga auditada; signos vitales; traslados; exportación; catálogos sin borrado), incluido el vector oficial TOTP del RFC 6238 y la gestión de usuarios (solo admin, solo su clínica, no puede autodesactivarse, la desactivación cierra la sesión, la contraseña temporal bloquea el acceso hasta cambiarla). Cubren el aislamiento entre clínicas, RBAC, la expiración por inactividad, la auditoría, los choques de sillón y de odontólogo, el bloqueo de notas SOEP, la inmutabilidad (RN-01), el odontograma, el periodontograma, las alertas de alergia, la firma de consentimientos (en pantalla y OTP), los presupuestos con aprobación parcial, el descargo de insumos, los honorarios y la operación (alta de clínica, healthcheck, errores JSON).
+- **Django:** 35 tests (incluye anulaciones con motivo, historial del odontograma en fecha y reprogramación con aviso) (archivos: tipo real y descarga auditada; signos vitales; traslados; exportación; catálogos sin borrado), incluido el vector oficial TOTP del RFC 6238 y la gestión de usuarios (solo admin, solo su clínica, no puede autodesactivarse, la desactivación cierra la sesión, la contraseña temporal bloquea el acceso hasta cambiarla). Cubren el aislamiento entre clínicas, RBAC, la expiración por inactividad, la auditoría, los choques de sillón y de odontólogo, el bloqueo de notas SOEP, la inmutabilidad (RN-01), el odontograma, el periodontograma, las alertas de alergia, la firma de consentimientos (en pantalla y OTP), los presupuestos con aprobación parcial, el descargo de insumos, los honorarios y la operación (alta de clínica, healthcheck, errores JSON).
 - **Go:** tests de integración contra PostgreSQL y Redis reales. Cubren la autenticación, la sesión inactiva, los roles, el aislamiento entre clínicas, las validaciones de cobro, el comprobante, **5 cobros simultáneos que nunca superan el saldo**, el cierre de caja ciego y el reporte de ingresos.
 - **UAT:** 37 criterios de punta a punta a través de Caddy, uno o más por requisito (RF-01 a RF-14, RN-01 a RN-03, RNF-05, RNF-06).
 

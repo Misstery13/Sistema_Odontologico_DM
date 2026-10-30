@@ -119,11 +119,12 @@ class ToothSerializer(serializers.ModelSerializer):
 
 class TreatmentSerializer(TenantSerializer):
     dentist_name = serializers.StringRelatedField(source="dentist", read_only=True)
+    voided_by_name = serializers.StringRelatedField(source="voided_by", read_only=True)
 
     class Meta:
         model = Treatment
         exclude = ["clinic"]
-        read_only_fields = ["dentist", "lab_cost", "material_cost"]
+        read_only_fields = ["dentist", "lab_cost", "material_cost", "voided", "void_reason", "voided_by", "voided_at"]
         extra_kwargs = {"procedure": {"required": False}, "cost": {"required": False}}
 
     def validate(self, data):
@@ -132,7 +133,7 @@ class TreatmentSerializer(TenantSerializer):
         if item:
             if item.budget.patient_id != data["patient"].pk or item.approved is not True:
                 raise serializers.ValidationError({"budget_item": "El ítem no está aprobado para este paciente"})
-            if hasattr(item, "treatment"):
+            if item.treatments.filter(voided=False).exists():
                 raise serializers.ValidationError({"budget_item": "Este ítem del presupuesto ya fue realizado"})
             catalog = data["catalog"] = item.procedure
             data["tooth"] = data.get("tooth") or item.tooth
@@ -409,7 +410,7 @@ class BudgetItemSerializer(serializers.ModelSerializer):
         read_only_fields = ["fee", "lab_cost", "approved"]
 
     def get_done(self, obj):
-        return hasattr(obj, "treatment")
+        return any(not t.voided for t in obj.treatments.all())
 
     def get_scheduled(self, obj):
         return obj.appointments.exclude(status__in=Appointment.INACTIVE).exists()

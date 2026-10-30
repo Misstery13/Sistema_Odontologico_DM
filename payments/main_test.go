@@ -64,8 +64,8 @@ func newClinic(t *testing.T, a *App) fixture {
 		medical_history, created_at, emergency_contact_name, emergency_contact_phone, guardian_name, guardian_cedula, insurance,
 		systemic_diseases, surgical_history, anticoagulated, coagulopathy)
 		VALUES ($1, $2, 'P', 'Test', '', '', '', '', now(), '', '', '', '', '', '', '', false, false) RETURNING id`, fx.clinic, n[len(n)-12:])
-	exec(t, a, `INSERT INTO clinica_treatment (clinic_id, patient_id, procedure, cost, date, notes, lab_cost, material_cost)
-		VALUES ($1, $2, 'Endodoncia', 100, now()::date, '', 0, 0) RETURNING id`, fx.clinic, fx.patient)
+	exec(t, a, `INSERT INTO clinica_treatment (clinic_id, patient_id, procedure, cost, date, notes, lab_cost, material_cost, voided, void_reason)
+		VALUES ($1, $2, 'Endodoncia', 100, now()::date, '', 0, 0, false, '') RETURNING id`, fx.clinic, fx.patient)
 	return fx
 }
 
@@ -248,5 +248,52 @@ func TestBlindCashClosingAndIncome(t *testing.T) {
 	_, inc := call(t, f, "GET", "/pay/reports/income?from="+today+"&to="+today, aud, nil)
 	if len(inc.([]any)) != 2 {
 		t.Errorf("ingresos por método: %v", inc)
+	}
+}
+
+// RN-01: un cobro erróneo se anula con nota de crédito y libera el saldo; un tratamiento anulado tampoco cuenta.
+func TestVoidPayment(t *testing.T) {
+	a, f := setup(t)
+	fx := newClinic(t, a)
+	rec := fx.tokens["recepcion"]
+	_, b := call(t, f, "POST", "/pay/payments", rec, map[string]any{"patient_id": fx.patient, "amount": 60, "method": "tarjeta_debito", "buyer_id": "0912345678", "buyer_name": "P"})
+	id := int64(b.(map[string]any)["id"].(float64))
+	url := fmt.Sprintf("/pay/payments/%d/void", id)
+	balance := func() float64 {
+		_, r := call(t, f, "GET", fmt.Sprintf("/pay/patients/%d/balance", fx.patient), rec, nil)
+		return r.(map[string]any)["balance"].(float64)
+	}
+	if balance() != 40 {
+		t.Fatalf("saldo antes de anular: %v", balance())
+	}
+	if s, _ := call(t, f, "POST", url, rec, map[string]any{"reason": "error"}); s != 400 {
+		t.Errorf("motivo corto: %d", s)
+	}
+	if s, _ := call(t, f, "POST", url, fx.tokens["odontologo"], map[string]any{"reason": "Monto digitado mal"}); s != 403 {
+		t.Errorf("odontólogo anulando: %d", s)
+	}
+	s, v := call(t, f, "POST", url, rec, map[string]any{"reason": "Monto digitado mal"})
+	if s != 200 || !strings.HasPrefix(v.(map[string]any)["credit_note"].(string), "NC-") {
+		t.Fatalf("anulación: %d %v", s, v)
+	}
+	if balance() != 100 {
+		t.Errorf("el pago anulado sigue descontando: %v", balance())
+	}
+	if s, _ := call(t, f, "POST", url, rec, map[string]any{"reason": "Monto digitado mal"}); s != 409 {
+		t.Errorf("doble anulación: %d", s)
+	}
+	other := newClinic(t, a)
+	if s, _ := call(t, f, "POST", url, other.tokens["recepcion"], map[string]any{"reason": "Monto digitado mal"}); s != 404 {
+		t.Errorf("anulación desde otra clínica: %d", s)
+	}
+	// con la caja del día cerrada, ya no se anula
+	_, b2 := call(t, f, "POST", "/pay/payments", rec, map[string]any{"patient_id": fx.patient, "amount": 10, "method": "efectivo", "buyer_id": "0912345678", "buyer_name": "P"})
+	call(t, f, "POST", "/pay/cash-closings", rec, map[string]any{"counted": 10})
+	if s, _ := call(t, f, "POST", fmt.Sprintf("/pay/payments/%d/void", int64(b2.(map[string]any)["id"].(float64))), rec, map[string]any{"reason": "Monto digitado mal"}); s != 409 {
+		t.Errorf("anulación con caja cerrada: %d", s)
+	}
+	exec(t, a, `UPDATE clinica_treatment SET voided = true WHERE patient_id = $1 RETURNING id`, fx.patient)
+	if balance() != -10 {
+		t.Errorf("tratamiento anulado sigue sumando: %v", balance())
 	}
 }

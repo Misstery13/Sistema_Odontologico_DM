@@ -34,6 +34,10 @@ components:
         buyer_id: { type: string, example: "0912345678", description: "Cédula (10), RUC (13, termina en 001) o 9999999999999 (consumidor final)" }
         buyer_name: { type: string }
         created_at: { type: string, format: date-time }
+        voided: { type: boolean }
+        void_reason: { type: string }
+        voided_at: { type: string, format: date-time }
+        credit_note: { type: string, example: "NC-001-001-000000123" }
     Closing:
       type: object
       properties:
@@ -124,6 +128,22 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { description: Comprobante inexistente o de otra clínica }
+  /payments/{id}/void:
+    post:
+      summary: Anular un cobro con nota de crédito (RN-01)
+      description: "Rol: recepcion. Requiere motivo (10+ caracteres). No se permite si la caja de ese día ya se cerró."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [reason], properties: { reason: { type: string, minLength: 10 } } } } }
+      responses:
+        "200": { description: Cobro anulado, content: { application/json: { schema: { $ref: "#/components/schemas/Payment" } } } }
+        "400": { description: Falta el motivo }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: Ya anulado o caja del día cerrada }
   /cash-closings:
     post:
       summary: Cierre de caja ciego del día (RN-02)

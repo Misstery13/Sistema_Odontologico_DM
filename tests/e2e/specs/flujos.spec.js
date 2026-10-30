@@ -6,9 +6,18 @@ const noHorizontalOverflow = async (page) =>
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
 
 test.describe("sin sesión", () => {
-  test("login pide usuario y contraseña", async ({ page }) => {
+  test("formulario de ingreso", async ({ page }) => {
     await page.goto("/");
     await expect(page.getByRole("heading", { name: "Ingresa a tu clínica" })).toBeVisible();
+    await expect(page.getByLabel("Usuario")).toBeVisible();
+    await expect(page.getByLabel("Contraseña")).toBeVisible();
+    await noHorizontalOverflow(page);
+  });
+
+  // el login tiene límite de 10 intentos por minuto: se envían credenciales desde un solo navegador
+  test("la contraseña lleva al segundo factor", async ({ page }, info) => {
+    test.skip(info.project.name !== "chrome-1920", "un solo envío de credenciales por corrida");
+    await page.goto("/");
     await page.getByLabel("Usuario").fill("dra.lopez");
     await page.getByLabel("Contraseña").fill("odonto123");
     await page.getByRole("button", { name: "Continuar" }).click();

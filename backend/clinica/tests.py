@@ -458,3 +458,75 @@ class ExpedienteTests(APITestCase):
         self.auth(self.admin)
         r = self.client.patch(f"/api/procedures/{self.proc.id}/", {"fee": 30, "recipe": [{"supply": self.gloves.id, "quantity": 3}]}, format="json")
         self.assertEqual((r.status_code, r.json()["fee"], r.json()["recipe"][0]["quantity"]), (200, "30.00", "3.00"))
+
+
+class CorrectionsTests(APITestCase):
+    """Anulaciones (RN-01), historial del odontograma y reprogramación de citas."""
+
+    def setUp(self):
+        from .models import Procedure
+        clinic = Clinic.objects.create(name="A")
+        self.dentist = User.objects.create_user("d", password="x", clinic=clinic, role="odontologo", first_name="Ana")
+        self.recep = User.objects.create_user("r", password="x", clinic=clinic, role="recepcion")
+        self.auditor = User.objects.create_user("au", password="x", clinic=clinic, role="auditor")
+        self.chair = Chair.objects.create(clinic=clinic, name="S1")
+        self.patient = Patient.objects.create(clinic=clinic, cedula="1", first_name="P", last_name="A", phone="0990000000")
+        self.proc = Procedure.objects.create(clinic=clinic, code="RES", name="Resina", fee=45)
+
+    def auth(self, user):
+        self.client.credentials(HTTP_AUTHORIZATION="Token " + Token.objects.get_or_create(user=user)[0].key)
+
+    def test_void_treatment(self):
+        from .models import CommissionRule
+        CommissionRule.objects.create(clinic=self.patient.clinic, dentist=self.dentist, kind="pct", value=50)
+        self.auth(self.dentist)
+        b = self.client.post("/api/budgets/", {"patient": self.patient.id, "items": [{"phase": 1, "procedure": self.proc.id}]}, format="json").json()
+        item = b["items"][0]["id"]
+        self.client.post(f"/api/budgets/{b['id']}/decide/", {"approved_items": [item]}, format="json")
+        t = self.client.post("/api/treatments/", {"patient": self.patient.id, "budget_item": item, "date": "2026-10-10"}, format="json").json()
+        self.assertEqual(self.client.get(f"/api/budgets/pending/?patient={self.patient.id}").json(), [])
+        url = f"/api/treatments/{t['id']}/void/"
+        self.assertEqual(self.client.post(url, {"reason": "error"}).status_code, 400)  # motivo muy corto
+        self.auth(self.recep)
+        self.assertEqual(self.client.post(url, {"reason": "Registrado en el paciente equivocado"}).status_code, 403)
+        self.auth(self.dentist)
+        r = self.client.post(url, {"reason": "Registrado en el paciente equivocado"})
+        self.assertEqual((r.status_code, r.json()["voided"], r.json()["voided_by_name"]), (200, True, "d"))
+        self.assertEqual(self.client.post(url, {"reason": "Registrado en el paciente equivocado"}).status_code, 400)
+        self.assertEqual([i["id"] for i in self.client.get(f"/api/budgets/pending/?patient={self.patient.id}").json()], [item])
+        again = self.client.post("/api/treatments/", {"patient": self.patient.id, "budget_item": item, "date": "2026-10-11"}, format="json")
+        self.assertEqual(again.status_code, 201)  # el ítem puede volver a registrarse correctamente
+        self.auth(self.auditor)
+        row = self.client.get("/api/reports/?from=2026-10-01&to=2026-10-31").json()["commissions"][0]
+        self.assertEqual((row["treatments"], row["production"]), (1, 45))  # la anulación no cuenta
+        self.assertTrue(AuditLog.objects.filter(action="update", model="Treatment", object_id=str(t["id"])).exists())
+
+    def test_odontogram_history_at_date(self):
+        from .models import ToothEvent
+        self.auth(self.dentist)
+        url = f"/api/patients/{self.patient.id}/odontogram/"
+        self.client.post(url, {"number": 36, "state": "sano", "surfaces": {"O": "caries"}}, format="json")
+        ToothEvent.objects.update(created_at=timezone.now() - timedelta(days=10))  # el hallazgo fue hace 10 días
+        self.client.post(url, {"number": 36, "state": "sano", "surfaces": {"O": "restauracion"}}, format="json")
+        past = (timezone.localdate() - timedelta(days=5)).isoformat()
+        self.assertEqual(self.client.get(f"{url}?at={past}").json(), [{"number": 36, "state": "sano", "surfaces": {"O": "caries"}}])
+        self.assertEqual(self.client.get(url).json()[0]["surfaces"], {"O": "restauracion"})
+        history = self.client.get(f"/api/patients/{self.patient.id}/odontogram-history/").json()
+        self.assertEqual([h["surfaces"] for h in history], [{"O": "restauracion"}, {"O": "caries"}])
+        self.assertEqual(history[0]["user"], "Ana")
+
+    def test_reschedule_notifies_and_rechecks_overlap(self):
+        from django.core.management import call_command
+        self.auth(self.recep)
+        start = timezone.localtime() + timedelta(hours=30)
+        mk = lambda s: self.client.post("/api/appointments/", {"patient": self.patient.id, "dentist": self.dentist.id, "chair": self.chair.id,
+                                                               "start": s.strftime("%Y-%m-%dT%H:%M")}).json()
+        a, b = mk(start), mk(start + timedelta(hours=2))
+        call_command("send_reminders")
+        clash = self.client.patch(f"/api/appointments/{b['id']}/", {"start": start.strftime("%Y-%m-%dT%H:%M")})
+        self.assertEqual(clash.status_code, 400)  # la reprogramación también respeta RN-03
+        new = start + timedelta(hours=4)
+        self.assertEqual(self.client.patch(f"/api/appointments/{a['id']}/", {"start": new.strftime("%Y-%m-%dT%H:%M")}).status_code, 200)
+        call_command("send_reminders")
+        kinds = list(Notification.objects.filter(appointment_id=a["id"]).order_by("id").values_list("kind", flat=True))
+        self.assertEqual(kinds, ["confirmacion", "recordatorio_48h", "reprogramacion", "recordatorio_48h"])

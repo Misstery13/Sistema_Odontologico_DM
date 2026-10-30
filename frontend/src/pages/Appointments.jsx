@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, formSubmit } from "../api.js";
 
@@ -25,6 +25,37 @@ const INACTIVE = ["cancelado", "no_asistio"];
 const statusText = (s) =>
   INACTIVE.includes(s) ? "text-red" : s === "atendido" ? "text-pencil" : s === "en_atencion" || s === "en_espera" ? "font-semibold text-pen" : "text-pen";
 
+const localInput = (iso) => {
+  const d = new Date(iso);
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+};
+
+// cambia fecha, hora, duración, consultorio u odontólogo; vuelve a validar choques (RN-03) y avisa al paciente
+function Reschedule({ a, chairs, dentists, onDone }) {
+  const [error, setError] = useState("");
+  const submit = formSubmit(async (d) => {
+    await api(`/api/appointments/${a.id}/`, {
+      method: "PATCH",
+      body: { start: d.start, minutes: Number(d.minutes), chair: Number(d.chair), dentist: Number(d.dentist) },
+    });
+    onDone(d.start.slice(0, 10));
+  }, setError);
+  return (
+    <form onSubmit={submit} className="grid items-end gap-3 sm:grid-cols-[1fr_90px_1fr_1fr_auto]">
+      <label><span className="label">Nueva fecha y hora</span><input name="start" type="datetime-local" defaultValue={localInput(a.start)} className="field" required /></label>
+      <label><span className="label">Minutos</span><input name="minutes" type="number" min="5" max="480" step="5" defaultValue={a.minutes} className="field" /></label>
+      <label><span className="label">Consultorio</span>
+        <select name="chair" defaultValue={a.chair} className="field">{chairs.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
+      </label>
+      <label><span className="label">Odontólogo</span>
+        <select name="dentist" defaultValue={a.dentist} className="field">{dentists.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}</select>
+      </label>
+      <button className="btn">Guardar y avisar</button>
+      {error && <p className="error sm:col-span-5" role="alert">{error}</p>}
+    </form>
+  );
+}
+
 export default function Appointments() {
   const [view, setView] = useState("dia");
   const [date, setDate] = useState(() => iso(new Date()));
@@ -36,6 +67,7 @@ export default function Appointments() {
   const [patient, setPatient] = useState("");
   const [planned, setPlanned] = useState([]); // RF-08: ítems aprobados del presupuesto del paciente
   const [fresh, setFresh] = useState(null);
+  const [moving, setMoving] = useState(null); // cita que se está reprogramando
   const [error, setError] = useState("");
 
   const from = view === "dia" ? date : monday(date);
@@ -138,7 +170,8 @@ export default function Appointments() {
                 {items?.map((a) => {
                   const off = INACTIVE.includes(a.status);
                   return (
-                    <tr key={a.id} className="rule-row">
+                    <Fragment key={a.id}>
+                    <tr className="rule-row">
                       <td className="px-5 py-2.5">
                         <span className={`font-semibold ${off ? "text-pencil" : "text-pen"}`}>{time(a.start)}</span>
                         <span className="ml-1.5 text-sm text-pencil">{a.minutes}′</span>
@@ -156,8 +189,21 @@ export default function Appointments() {
                           className={`field w-44 py-1 text-sm ${statusText(a.status)}`}>
                           {Object.entries(STATUS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
                         </select>
+                        {!off && a.status !== "atendido" && (
+                          <button onClick={() => setMoving(moving === a.id ? null : a.id)} className="link mt-1 block text-xs">
+                            {moving === a.id ? "Cancelar" : "Reprogramar"}
+                          </button>
+                        )}
                       </td>
                     </tr>
+                    {moving === a.id && (
+                      <tr className="rule-row bg-rule/20">
+                        <td colSpan="5" className="px-5 py-3">
+                          <Reschedule a={a} chairs={chairs} dentists={dentists} onDone={(day) => { setMoving(null); setFresh(a.id); day === date ? load() : setDate(day); }} />
+                        </td>
+                      </tr>
+                    )}
+                    </Fragment>
                   );
                 })}
               </tbody>

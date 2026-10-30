@@ -83,3 +83,37 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm audit --omit=dev --audit-level=moderate
+
+  # Sistema completo con Docker: aceptación (UAT), carga corta y navegadores (RNF-01/03/07/08).
+  # Las pausas de 61 s respetan el límite de 10 ingresos por minuto y el uso único de cada código MFA.
+  e2e:
+    runs-on: ubuntu-latest
+    needs: [backend, payments, frontend]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Levantar el sistema
+        run: |
+          docker compose up --build -d
+          for i in $(seq 1 90); do
+            curl -sf http://127.0.0.1:8080/api/health/ && curl -sf http://127.0.0.1:8080/pay/health && break
+            sleep 2
+          done
+      - name: Pruebas de aceptación (UAT)
+        run: python3 tests/uat.py http://127.0.0.1:8080
+      - name: Prueba de carga corta (30 usuarios, 30 s)
+        run: sleep 61 && python3 tests/load.py http://127.0.0.1:8080 30 30
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Navegadores (Chromium, Firefox, WebKit)
+        working-directory: tests/e2e
+        env:
+          BASE_URL: http://127.0.0.1:8080
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium firefox webkit
+          sleep 61
+          npx playwright test --reporter=line
+      - name: Logs del sistema si algo falla
+        if: failure()
+        run: docker compose logs --tail 200

@@ -14,7 +14,7 @@ STAFF = {"recepcion", "odontologo", "asistente"}
 PERMISSIONS = {
     "patients": (STAFF, {"recepcion", "odontologo"}),
     "odontogram": (STAFF, {"odontologo"}),
-    "treatments": (STAFF | {"auditor"}, {"odontologo"}),
+    "treatments": (STAFF | {"auditor"}, {"odontologo"}),  # incluye anular (POST /void/)
     "notes": ({"odontologo", "asistente"}, {"odontologo", "asistente"}),
     "appointments": (STAFF, STAFF),
     "chairs": (STAFF | {"admin"}, {"admin"}),

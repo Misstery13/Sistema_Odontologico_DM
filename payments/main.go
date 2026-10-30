@@ -37,6 +37,11 @@ type Payment struct {
 	Auth      string    `json:"authorization,omitempty"` // código de la pasarela (tarjeta)
 	BuyerID   string    `json:"buyer_id"`                // cédula, RUC o 9999999999999 (consumidor final)
 	BuyerName string    `json:"buyer_name"`
+	// RN-01: un cobro erróneo no se borra; se anula con nota de crédito
+	Voided     bool       `json:"voided"`
+	VoidReason string     `json:"void_reason,omitempty"`
+	VoidedAt   *time.Time `json:"voided_at,omitempty"`
+	CreditNote string     `json:"credit_note,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -85,6 +90,17 @@ var authorizeCard = func(cents int64, clinic int64) (string, error) {
 	return code, nil
 }
 
+// issueCreditNote emite la nota de crédito que anula un comprobante (y reversa el cobro en la pasarela si fue con tarjeta).
+// ponytail: adaptador simulado (solo log); conectar aquí el SRI y la pasarela reales.
+var issueCreditNote = func(p Payment, clinic int64) string {
+	n := fmt.Sprintf("NC-001-001-%09d", p.ID)
+	log.Printf("[SRI simulado] clínica %d nota de crédito %s anula %s por %.2f", clinic, n, p.Invoice, p.Amount)
+	if strings.HasPrefix(p.Method, "tarjeta") {
+		log.Printf("[pasarela simulada] reverso de la autorización %s", p.Auth)
+	}
+	return n
+}
+
 // issueInvoice emite el comprobante electrónico.
 // ponytail: adaptador simulado (solo log); conectar aquí la API de facturación electrónica del SRI.
 var issueInvoice = func(p Payment, clinic int64) string {
@@ -120,6 +136,11 @@ func connect(ctx context.Context, dbURL, redisURL string) (*App, error) {
 		`ALTER TABLE payments ADD COLUMN IF NOT EXISTS authorization_code TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE payments ADD COLUMN IF NOT EXISTS buyer_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE payments ADD COLUMN IF NOT EXISTS buyer_name TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE payments ADD COLUMN IF NOT EXISTS voided BOOLEAN NOT NULL DEFAULT false`,
+		`ALTER TABLE payments ADD COLUMN IF NOT EXISTS void_reason TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE payments ADD COLUMN IF NOT EXISTS voided_by BIGINT`,
+		`ALTER TABLE payments ADD COLUMN IF NOT EXISTS voided_at TIMESTAMPTZ`,
+		`ALTER TABLE payments ADD COLUMN IF NOT EXISTS credit_note TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS payments_patient_idx ON payments (clinic_id, patient_id)`,
 		`CREATE TABLE IF NOT EXISTS cash_closings (
 			id BIGSERIAL PRIMARY KEY,
@@ -159,6 +180,7 @@ func (a *App) routes() *fiber.App {
 	api.Get("/patients/:id/payments", allow(readers), a.listPayments)
 	api.Post("/payments", allow(cashiers), a.createPayment)
 	api.Get("/payments/:id/receipt", allow(readers), a.receipt)
+	api.Post("/payments/:id/void", allow(cashiers), a.voidPayment)
 	api.Post("/cash-closings", allow(cashiers), a.closeCash)
 	api.Get("/cash-closings", allow(auditors), a.listClosings)
 	api.Get("/reports/income", allow(auditors), a.income)
@@ -211,8 +233,8 @@ func (a *App) auth(c *fiber.Ctx) error {
 func balanceCents(ctx context.Context, q querier, clinic, patient int64) (int64, error) {
 	var b int64
 	err := q.QueryRow(ctx, `SELECT
-		(SELECT COALESCE(SUM(cost), 0) * 100 FROM clinica_treatment WHERE clinic_id = $1 AND patient_id = $2)::bigint -
-		(SELECT COALESCE(SUM(amount_cents), 0) FROM payments WHERE clinic_id = $1 AND patient_id = $2)::bigint`,
+		(SELECT COALESCE(SUM(cost), 0) * 100 FROM clinica_treatment WHERE clinic_id = $1 AND patient_id = $2 AND NOT voided)::bigint -
+		(SELECT COALESCE(SUM(amount_cents), 0) FROM payments WHERE clinic_id = $1 AND patient_id = $2 AND NOT voided)::bigint`,
 		clinic, patient).Scan(&b)
 	return b, err
 }
@@ -242,7 +264,8 @@ func (a *App) listPayments(c *fiber.Ctx) error {
 	if err != nil {
 		return fail(c, 404, "Paciente no encontrado")
 	}
-	rows, err := a.db.Query(c.Context(), `SELECT id, amount_cents, method, invoice_number, authorization_code, buyer_id, buyer_name, created_at FROM payments
+	rows, err := a.db.Query(c.Context(), `SELECT id, amount_cents, method, invoice_number, authorization_code, buyer_id, buyer_name, created_at,
+		voided, void_reason, voided_at, credit_note FROM payments
 		WHERE clinic_id = $1 AND patient_id = $2 ORDER BY created_at DESC`, sess(c).clinic, pid)
 	if err != nil {
 		return err
@@ -252,7 +275,8 @@ func (a *App) listPayments(c *fiber.Ctx) error {
 	for rows.Next() {
 		var p Payment
 		var cents int64
-		if err := rows.Scan(&p.ID, &cents, &p.Method, &p.Invoice, &p.Auth, &p.BuyerID, &p.BuyerName, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &cents, &p.Method, &p.Invoice, &p.Auth, &p.BuyerID, &p.BuyerName, &p.CreatedAt,
+			&p.Voided, &p.VoidReason, &p.VoidedAt, &p.CreditNote); err != nil {
 			return err
 		}
 		p.Amount = float64(cents) / 100
@@ -341,10 +365,10 @@ func (a *App) receipt(c *fiber.Ctx) error {
 	var cents int64
 	var clinicName, patientName string
 	err = a.db.QueryRow(c.Context(), `SELECT p.id, p.amount_cents, p.method, p.invoice_number, p.authorization_code, p.buyer_id,
-		p.buyer_name, p.created_at, k.name, pa.first_name || ' ' || pa.last_name
+		p.buyer_name, p.created_at, k.name, pa.first_name || ' ' || pa.last_name, p.voided, p.credit_note
 		FROM payments p JOIN clinica_clinic k ON k.id = p.clinic_id JOIN clinica_patient pa ON pa.id = p.patient_id
 		WHERE p.id = $1 AND p.clinic_id = $2`, pid, s.clinic).Scan(&p.ID, &cents, &p.Method, &p.Invoice, &p.Auth, &p.BuyerID,
-		&p.BuyerName, &p.CreatedAt, &clinicName, &patientName)
+		&p.BuyerName, &p.CreatedAt, &clinicName, &patientName, &p.Voided, &p.CreditNote)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fail(c, 404, "Comprobante no encontrado")
 	} else if err != nil {
@@ -363,6 +387,61 @@ func (a *App) receipt(c *fiber.Ctx) error {
 		"tax": fiber.Map{"iva_rate": 0, "note": "Servicios de salud: tarifa 0 % de IVA"}})
 }
 
+// voidPayment anula un cobro con justificación y nota de crédito. No se permite si la caja de ese día ya se cerró:
+// la anulación cambiaría un cierre ya cuadrado (RN-02); una corrección posterior va con un nuevo cobro o reembolso.
+func (a *App) voidPayment(c *fiber.Ctx) error {
+	s := sess(c)
+	pid, err := c.ParamsInt("id")
+	if err != nil {
+		return fail(c, 404, "Cobro no encontrado")
+	}
+	var in struct {
+		Reason string `json:"reason"`
+	}
+	if err := c.BodyParser(&in); err != nil || len([]rune(strings.TrimSpace(in.Reason))) < 10 {
+		return fail(c, 400, "Explica el motivo de la anulación (mínimo 10 caracteres)")
+	}
+	ctx := c.Context()
+	tx, err := a.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var p Payment
+	var cents int64
+	var closed bool
+	err = tx.QueryRow(ctx, `SELECT p.id, p.amount_cents, p.method, p.invoice_number, p.authorization_code, p.voided,
+		EXISTS (SELECT 1 FROM cash_closings k WHERE k.clinic_id = p.clinic_id AND k.day = (p.created_at AT TIME ZONE 'America/Guayaquil')::date)
+		FROM payments p WHERE p.id = $1 AND p.clinic_id = $2 FOR UPDATE OF p`, pid, s.clinic).Scan(&p.ID, &cents, &p.Method, &p.Invoice, &p.Auth, &p.Voided, &closed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fail(c, 404, "Cobro no encontrado")
+	} else if err != nil {
+		return err
+	}
+	if p.Voided {
+		return fail(c, 409, "El cobro ya está anulado")
+	}
+	if closed {
+		return fail(c, 409, "La caja de ese día ya fue cerrada; no se puede anular el cobro")
+	}
+	p.Amount = float64(cents) / 100
+	p.CreditNote = issueCreditNote(p, s.clinic)
+	err = tx.QueryRow(ctx, `UPDATE payments SET voided = true, void_reason = $1, voided_by = $2, voided_at = now(), credit_note = $3
+		WHERE id = $4 RETURNING voided_at`, strings.TrimSpace(in.Reason), s.user, p.CreditNote, p.ID).Scan(&p.VoidedAt)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO clinica_auditlog (clinic_id, user_id, action, model, object_id, ip, timestamp)
+		VALUES ($1, $2, 'update', 'Payment', $3, $4, now())`, s.clinic, s.user, fmt.Sprint(p.ID), c.IP()); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	p.Voided, p.VoidReason = true, strings.TrimSpace(in.Reason)
+	return c.JSON(p)
+}
+
 // closeCash registra el conteo físico del efectivo del día. RN-02: el total teórico solo se revela
 // después de guardar el conteo; no existe otro endpoint que lo muestre a la recepción.
 func (a *App) closeCash(c *fiber.Ctx) error {
@@ -378,7 +457,7 @@ func (a *App) closeCash(c *fiber.Ctx) error {
 	err := a.db.QueryRow(c.Context(), `
 		INSERT INTO cash_closings (clinic_id, user_id, day, counted_cents, expected_cents)
 		SELECT $1, $2, d, $3, (SELECT COALESCE(SUM(amount_cents), 0) FROM payments
-			WHERE clinic_id = $1 AND method = 'efectivo' AND (created_at AT TIME ZONE 'America/Guayaquil')::date = d)
+			WHERE clinic_id = $1 AND method = 'efectivo' AND NOT voided AND (created_at AT TIME ZONE 'America/Guayaquil')::date = d)
 		FROM (SELECT (now() AT TIME ZONE 'America/Guayaquil')::date AS d) t
 		ON CONFLICT (clinic_id, day) DO NOTHING
 		RETURNING day, expected_cents`, s.clinic, s.user, parseCents(in.Counted)).Scan(&day, &expected)
@@ -427,7 +506,7 @@ func (a *App) income(c *fiber.Ctx) error {
 		return fail(c, 400, "Indica el rango ?from=AAAA-MM-DD&to=AAAA-MM-DD")
 	}
 	rows, err := a.db.Query(c.Context(), `SELECT method, COUNT(*), SUM(amount_cents) FROM payments
-		WHERE clinic_id = $1 AND (created_at AT TIME ZONE 'America/Guayaquil')::date BETWEEN $2::date AND $3::date
+		WHERE clinic_id = $1 AND NOT voided AND (created_at AT TIME ZONE 'America/Guayaquil')::date BETWEEN $2::date AND $3::date
 		GROUP BY method ORDER BY SUM(amount_cents) DESC`, sess(c).clinic, from, to)
 	if err != nil {
 		return err
