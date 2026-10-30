@@ -1,0 +1,15 @@
+# Servidor casero detrás de Tailscale Funnel: Tailscale termina HTTPS en https://<máquina>.<tailnet>.ts.net
+# y reenvía a este Caddy, que solo escucha en 127.0.0.1 (ver docker-compose.funnel.yml).
+{
+	servers {
+		# conservar la IP real del visitante que informa tailscaled (para la auditoría, RNF-06)
+		trusted_proxies static private_ranges
+	}
+}
+
+import common.caddy
+
+:80 {
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	import app
+}

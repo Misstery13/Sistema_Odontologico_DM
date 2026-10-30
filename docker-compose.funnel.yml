@@ -1,0 +1,18 @@
+# Servidor casero publicado con Tailscale Funnel (sin abrir puertos del router, sin dominio propio).
+# Se aplica encima de docker-compose.yml + docker-compose.prod.yml:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.funnel.yml --env-file .env.funnel up -d --build
+# Lo hace scripts/desplegar-funnel.sh. Guía: docs/despliegue/tailscale-funnel.md
+#
+# Diferencias con producción con dominio propio: Tailscale termina HTTPS, así que Caddy sirve HTTP
+# solo en 127.0.0.1 (nunca expuesto a la LAN) y no gestiona certificados.
+
+services:
+  caddy:
+    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile.funnel", "--adapter", "caddyfile"]
+    ports: !override
+      - "127.0.0.1:${HTTP_PORT:-8080}:80"
+
+  backend:
+    environment:
+      # SITE_ADDRESS es el nombre de la máquina en la tailnet (p. ej. servidor.tailabc123.ts.net)
+      SEED_DEMO: ${SEED_DEMO:-0}
