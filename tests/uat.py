@@ -126,8 +126,8 @@ def main():
     check("RF-03", "dentición temporal", call("POST", f"/api/patients/{pid}/odontogram/", D, {"number": 54, "state": "extraido", "surfaces": {}})[0] == 200)
     hist = call("GET", f"/api/patients/{pid}/odontogram-history/", D)[1]
     check("RF-03", "historial del odontograma con autor", len(hist) == 2 and hist[0]["number"] == 54 and hist[0]["user"] == "Ana López", hist)
-    yesterday = (date.today() - timedelta(days=1)).isoformat()
-    check("RF-03", "odontograma en una fecha pasada", call("GET", f"/api/patients/{pid}/odontogram/?at={yesterday}", D)[1] == [])
+    # fecha claramente anterior: "ayer" depende de la zona horaria del cliente y la clínica usa la de Ecuador
+    check("RF-03", "odontograma en una fecha pasada", call("GET", f"/api/patients/{pid}/odontogram/?at=2020-01-01", D)[1] == [])
 
     # --- RF-07/08 + RF-14: presupuesto → aprobación → tratamiento con descargo ---
     catalog = {p["code"]: p for p in call("GET", "/api/procedures/", D)[1]}
