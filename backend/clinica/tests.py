@@ -276,3 +276,41 @@ class OperationsTests(APITestCase):
         self.assertEqual(self.client.get("/api/health/").json(), {"status": "ok"})
         r = self.client.get("/api/no-existe/")
         self.assertEqual((r.status_code, r["Content-Type"]), (404, "application/json"))
+
+
+class MfaTests(APITestCase):
+    """RNF-05: segundo factor TOTP obligatorio."""
+
+    def setUp(self):
+        clinic = Clinic.objects.create(name="A")
+        self.user = User.objects.create_user("m", password="clave-segura-1", clinic=clinic, role="recepcion")
+
+    def login(self):
+        return self.client.post("/api/login/", {"username": "m", "password": "clave-segura-1"}).json()
+
+    def test_rfc6238_vector(self):
+        from . import mfa
+        # vector de prueba del RFC 6238 (SHA1, T=59 s): 94287082 -> últimos 6 dígitos
+        self.assertEqual(mfa.code_at("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", 59 // 30), "287082")
+
+    def test_enrollment_then_verify_and_no_replay(self):
+        from . import mfa
+        first = self.login()
+        self.assertEqual(first["mfa"], "setup")
+        self.assertNotIn("token", first)
+        self.assertTrue(first["qr"].startswith("data:image/svg+xml"))
+        bad = self.client.post("/api/login/mfa/", {"ticket": first["ticket"], "code": "000000"})
+        self.assertEqual(bad.status_code, 400)
+        code = mfa.code_at(first["secret"], int(__import__("time").time() // 30))
+        ok = self.client.post("/api/login/mfa/", {"ticket": first["ticket"], "code": code})
+        self.assertEqual(ok.status_code, 200)
+        self.assertIn("token", ok.json())
+        second = self.login()
+        self.assertEqual(second["mfa"], "verify")
+        self.assertNotIn("secret", second)  # el secreto solo se muestra al enrolar
+        replay = self.client.post("/api/login/mfa/", {"ticket": second["ticket"], "code": code})
+        self.assertEqual(replay.status_code, 400)  # el mismo código no sirve dos veces
+
+    def test_forged_ticket_rejected(self):
+        r = self.client.post("/api/login/mfa/", {"ticket": "falso", "code": "123456"})
+        self.assertEqual(r.status_code, 400)

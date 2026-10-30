@@ -63,7 +63,7 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": ["clinica.auth.ExpiringTokenAuthentication"],
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
-    "DEFAULT_THROTTLE_RATES": {"anon": "10/min"},
+    "DEFAULT_THROTTLE_RATES": {"anon": "10/min", "login": "10/min", "mfa": "10/min"},
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
 }
 SPECTACULAR_SETTINGS = {"TITLE": "Odonto DM API", "VERSION": "1.0.0"}
@@ -71,6 +71,8 @@ SPECTACULAR_SETTINGS = {"TITLE": "Odonto DM API", "VERSION": "1.0.0"}
 NOTE_LOCK_HOURS = int(os.environ.get("NOTE_LOCK_HOURS", "24"))  # RF-05
 SESSION_IDLE_MINUTES = int(os.environ.get("SESSION_IDLE_MINUTES", "15"))  # RNF-05
 MAX_DISCOUNT_PCT = int(os.environ.get("MAX_DISCOUNT_PCT", "15"))  # RF-07: descuento autorizado
+MFA_REQUIRED = os.environ.get("MFA_REQUIRED", "1") == "1"  # RNF-05: segundo factor obligatorio
+MFA_ISSUER = "Odonto DM"
 
 LOGGING = {
     "version": 1,

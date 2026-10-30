@@ -23,6 +23,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       ALLOWED_HOSTS: ${SITE_ADDRESS:?Define SITE_ADDRESS en .env},backend,127.0.0.1
       GUNICORN_WORKERS: ${GUNICORN_WORKERS:-4}
+      GUNICORN_THREADS: ${GUNICORN_THREADS:-4}
+      MFA_REQUIRED: ${MFA_REQUIRED:-1}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/')"]
       interval: 15s

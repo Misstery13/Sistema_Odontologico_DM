@@ -31,6 +31,14 @@ $P usuario "Clínica Sonrisa" recepcion1 recepcion
 
 Roles: `admin`, `recepcion`, `odontologo`, `asistente`, `auditor`. El mismo comando `usuario` cambia la contraseña de un usuario existente. El stock inicial se registra desde **Inventario** como movimientos de compra.
 
+**Verificación en dos pasos (RNF-05):** es obligatoria. En su primer ingreso cada usuario escanea un QR con Google Authenticator, Microsoft Authenticator o Authy; desde entonces se le pide el código de 6 dígitos. Si alguien pierde el teléfono:
+
+```bash
+$P reset_mfa dra.lopez   # en su próximo ingreso vuelve a enrolarse
+```
+
+El reloj del servidor debe estar sincronizado (NTP), porque los códigos dependen de la hora.
+
 ## Qué queda corriendo
 
 | Servicio | Función | Salud |
@@ -76,6 +84,7 @@ Copia `./backups` fuera del servidor (almacenamiento de objetos o un segundo ser
 
 ```bash
 python tests/uat.py https://odonto.midominio.com   # solo en un entorno con datos demo (staging)
+python tests/load.py https://odonto.midominio.com 150 90   # carga: RNF-01 / RNF-03
 docker compose --profile zap run --rm zap zap-baseline.py -t https://odonto.midominio.com -r zap-baseline.html -I
 ```
 

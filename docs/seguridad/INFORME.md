@@ -6,14 +6,18 @@ Fecha: 29/10/2026. Alcance: los servicios `backend` (Django), `payments` (Go) y 
 
 | Criterio | Resultado | Evidencia |
 |---|---|---|
-| Cobertura ≥ 80 % en endpoints críticos | **Cumple**: Django 89 %, Go 83,9 % | `coverage report`; `go test -cover` (CI: `.github/workflows/ci.yml`) |
+| Cobertura ≥ 80 % en endpoints críticos | **Cumple**: Django 89 %, Go 84,1 % | `coverage report`; `go test -cover` (CI: `.github/workflows/ci.yml`) |
 | DAST/SAST sin severidad Alta o Crítica | **Cumple**: 0 altas, 0 críticas | ZAP (`zap-baseline.html`, `zap-api.html`), bandit, pip-audit, npm audit, govulncheck |
-| Documentación OpenAPI 3 | **Cumple** | `GET /api/schema/` (API Django) |
-| Pruebas de aceptación (UAT) | **Cumple**: 37/37 criterios | `tests/uat.py` contra el stack desplegado |
+| Documentación OpenAPI 3 | **Cumple** | `GET /api/schema/` (API clínica) y `GET /pay/openapi.yaml` (caja y facturación) |
+| Pruebas de aceptación (UAT) | **Cumple**: 39/39 criterios | `tests/uat.py` contra el stack desplegado |
+| RNF-01: expediente en menos de 1,5 s | **Cumple**: p95 262 ms con 150 usuarios | `tests/load.py` (ver «Rendimiento») |
+| RNF-03: 150 usuarios concurrentes | **Cumple**: 0 errores en 21.986 peticiones | `tests/load.py` |
+| RNF-05: MFA obligatorio | **Cumple** | TOTP RFC 6238 en el login; tests y UAT |
+| RNF-07: tablet junto al sillón | **Cumple** | Capturas en 1024×768, 768×1024 y 1366×768, sin desbordes |
 
 ## Pruebas automatizadas
 
-- **Django:** 21 tests. Cubren el aislamiento entre clínicas, RBAC, la expiración por inactividad, la auditoría, los choques de sillón y de odontólogo, el bloqueo de notas SOEP, la inmutabilidad (RN-01), el odontograma, el periodontograma, las alertas de alergia, la firma de consentimientos (en pantalla y OTP), los presupuestos con aprobación parcial, el descargo de insumos, los honorarios y la operación (alta de clínica, healthcheck, errores JSON).
+- **Django:** 24 tests, incluido el vector oficial TOTP del RFC 6238. Cubren el aislamiento entre clínicas, RBAC, la expiración por inactividad, la auditoría, los choques de sillón y de odontólogo, el bloqueo de notas SOEP, la inmutabilidad (RN-01), el odontograma, el periodontograma, las alertas de alergia, la firma de consentimientos (en pantalla y OTP), los presupuestos con aprobación parcial, el descargo de insumos, los honorarios y la operación (alta de clínica, healthcheck, errores JSON).
 - **Go:** tests de integración contra PostgreSQL y Redis reales. Cubren la autenticación, la sesión inactiva, los roles, el aislamiento entre clínicas, las validaciones de cobro, el comprobante, **5 cobros simultáneos que nunca superan el saldo**, el cierre de caja ciego y el reporte de ingresos.
 - **UAT:** 37 criterios de punta a punta a través de Caddy, uno o más por requisito (RF-01 a RF-14, RN-01 a RN-03, RNF-05, RNF-06).
 
@@ -30,6 +34,8 @@ Fecha: 29/10/2026. Alcance: los servicios `backend` (Django), `payments` (Go) y 
 | bandit | Contraseña fija `odonto123` | Baja | Solo en datos demo; el contenedor no ejecuta `seed` en producción (`# nosec B105`) |
 | Revisión manual | El contenedor cargaba usuarios demo con clave conocida en cualquier entorno | **Alta** | `seed` desactivado con `DJANGO_ENV=production`; altas con `nueva_clinica` y `usuario` |
 | Revisión manual | Producción podía arrancar con `SECRET_KEY` o la clave de BD de ejemplo | **Alta** | El backend se niega a arrancar (`ImproperlyConfigured`) |
+| Revisión manual | La CSP bloqueaba las imágenes `data:`: la firma de los consentimientos no se veía al reabrirlos | Media (funcional) | `img-src 'self' data:` |
+| Revisión en tablet | El odontograma no entraba en una tablet: había que desplazarse para ver la arcada | Media (usabilidad) | Grilla fluida: la arcada completa entra en 768 px |
 
 ## Riesgos aceptados y falsos positivos (ZAP)
 
@@ -48,14 +54,24 @@ Fecha: 29/10/2026. Alcance: los servicios `backend` (Django), `payments` (Go) y 
 | A04 Diseño inseguro | Bloqueo de fila (`FOR UPDATE`) contra cobros concurrentes. Cierre de caja ciego. OTP con vencimiento de 10 min y 5 intentos. |
 | A05 Configuración | DEBUG apagado y secretos validados al arrancar. Contenedores sin root. BD y Redis sin puertos públicos. Cabeceras de seguridad. |
 | A06 Componentes vulnerables | Auditoría de dependencias en cada push (CI). |
-| A07 Autenticación | Límite de 10 intentos de login por minuto. Validadores de contraseña (mínimo 10, no comunes). Sesión cerrada tras 15 min de inactividad, en cliente y servidor. Token nuevo en cada ingreso. |
+| A07 Autenticación | **MFA TOTP obligatorio** (enrolamiento con QR en el primer ingreso; el ticket entre pasos vence en 5 min; cada código sirve una sola vez). Límite de 10 intentos por minuto en cada paso. Validadores de contraseña (mínimo 10, no comunes). Sesión cerrada tras 15 min de inactividad. Token nuevo en cada ingreso. |
 | A09 Registro y monitoreo | Log de auditoría inmutable: quién, qué, cuándo (ISO-8601) e IP. Kardex inmutable. Logs de acceso de gunicorn. |
 
 ## Pendientes conocidos (fuera del alcance de esta entrega)
 
-- **MFA (RNF-05):** no implementada. Es lo prioritario antes de manejar expedientes reales.
+- **Secreto MFA:** se guarda en la BD protegida por el cifrado del disco; si se exige, cifrarlo con un KMS.
 - **Cifrado en reposo (RNF-04):** se delega al disco cifrado del servidor o al proveedor (ver `docs/DESPLIEGUE.md`).
 - **Firma de los registros clínicos:** es HMAC del servidor, no un certificado personal del profesional (PKI).
 - **Gestión de usuarios:** se hace por línea de comandos; no hay pantalla de administración.
 - **Integraciones:** SRI, WhatsApp/SMS y pasarela de pagos están simuladas.
-- **Rendimiento y concurrencia (RNF-01, RNF-03):** no hay prueba de carga con 150 usuarios.
+
+## Rendimiento (RNF-01, RNF-03)
+
+`python tests/load.py <url> <usuarios> <segundos>`. Simula personal de clínica con 2-5 s de reflexión entre acciones: abrir expediente (60 %, las 8 peticiones de la ficha en paralelo), agenda del día (25 %) y búsqueda (15 %).
+
+| Usuarios concurrentes | Peticiones | Errores | Expediente p50 | Expediente p95 | Expediente máx. |
+|---|---|---|---|---|---|
+| 10 (línea base, 60 s) | 1.024 (16/s) | 0 | 33 ms | 52 ms | 202 ms |
+| **150 (90 s)** | **21.986 (231/s)** | **0** | **96 ms** | **262 ms** | **487 ms** |
+
+Medido en una laptop con Docker Desktop (Windows), con cliente y servidor en la misma máquina y gunicorn con 3 workers × 4 hilos. La latencia sube con la carga (p95 de 52 a 262 ms), pero queda 5,7 veces por debajo del límite de 1,5 s. En producción hay que repetir la prueba contra el servidor real (`GUNICORN_WORKERS`, `GUNICORN_THREADS`).

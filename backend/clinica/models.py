@@ -46,6 +46,10 @@ class User(AbstractUser):
     clinic = models.ForeignKey(Clinic, null=True, blank=True, on_delete=models.PROTECT, related_name="users")
     role = models.CharField(max_length=12, choices=ROLES, default="recepcion")
     last_activity = models.DateTimeField(null=True, blank=True)  # RNF-05: cierre por inactividad
+    # RNF-05: MFA TOTP. ponytail: secreto en claro en la BD (protegida por el cifrado del disco); cifrar con KMS si se exige
+    mfa_secret = models.CharField(max_length=64, blank=True)
+    mfa_enabled = models.BooleanField(default=False)
+    mfa_last_step = models.BigIntegerField(default=0)  # impide reutilizar un código ya usado
 
 
 class Chair(models.Model):

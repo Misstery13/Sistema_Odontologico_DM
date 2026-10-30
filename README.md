@@ -21,7 +21,7 @@ navegador ──► caddy :8080 ──► /api/*  → backend (Django)  ─┐
 docker compose up --build
 ```
 
-Abrir http://localhost:8080 (usuarios en la tabla de roles más abajo). Para producción: [docs/DESPLIEGUE.md](docs/DESPLIEGUE.md).
+Abrir http://localhost:8080 (usuarios en la tabla de roles más abajo). El ingreso pide un código de verificación (MFA). Los usuarios demo comparten un secreto fijo: `python tests/totp.py` muestra el código vigente, o se puede cargar el secreto `ODONTODMDEMOMFA2` en cualquier app autenticadora. Para producción: [docs/DESPLIEGUE.md](docs/DESPLIEGUE.md).
 
 ## Alcance implementado (SRS SIGO-Dental, Fases 1 a 4)
 
@@ -47,19 +47,22 @@ Requisitos en `docs/Documento de Requerimientos de Software - Sistema Odontológ
 | Reportes | Producción, honorarios, procedimientos, ingresos por método, citas por estado y ausentismo, pacientes nuevos, consumo de insumos |
 | RN-02 | Cierre de caja ciego: el total del sistema solo se muestra después de registrar el conteo |
 | RN-03 | No se agendan dos citas a la vez en el mismo sillón ni con el mismo odontólogo |
-| RNF-05 | RBAC con 5 roles; sesión cerrada tras 15 min de inactividad (frontend y backend) |
+| RNF-05 | RBAC con 5 roles; MFA TOTP obligatorio (enrolamiento con QR); sesión cerrada tras 15 min de inactividad (frontend y backend) |
 | RNF-06 | Log de auditoría inmutable (usuario, acción, registro, timestamp ISO-8601, IP) |
-| 8.2 | OpenAPI 3 en `/api/schema/` |
+| RNF-01 / RNF-03 | Expediente p95 de 262 ms con 150 usuarios concurrentes, 0 errores (`tests/load.py`) |
+| RNF-07 | Revisado en iPad horizontal y vertical y en laptop 1366×768; el odontograma completo entra en una tablet |
+| 8.2 | OpenAPI 3 en `/api/schema/` (API clínica) y `/pay/openapi.yaml` (caja) |
 
-Pendientes: MFA, cifrado en reposo a nivel de aplicación (se delega al disco cifrado), firma con certificado personal (hoy HMAC del servidor), pantalla de gestión de usuarios (hoy por CLI), integraciones reales (SRI, WhatsApp/SMS, pasarela) y prueba de carga. Detalle en [docs/seguridad/INFORME.md](docs/seguridad/INFORME.md).
+Pendientes: cifrado en reposo a nivel de aplicación (se delega al disco cifrado), firma con certificado personal (hoy HMAC del servidor), pantalla de gestión de usuarios (hoy por CLI) e integraciones reales (SRI, WhatsApp/SMS, pasarela). Detalle en [docs/seguridad/INFORME.md](docs/seguridad/INFORME.md).
 
 ### Fase 4: calidad, seguridad y producción
 
 | Entregable | Dónde |
 |---|---|
-| Pruebas de aceptación (37 criterios, contra el sistema desplegado) | `python tests/uat.py [url]` |
-| Tests Django (cobertura 89 %) | `cd backend && coverage run manage.py test` |
-| Tests de integración Go (cobertura 83,9 %) | `sh scripts/test-payments.sh` (con el stack levantado) |
+| Pruebas de aceptación (39 criterios, contra el sistema desplegado) | `python tests/uat.py [url]` |
+| Prueba de carga (150 usuarios concurrentes) | `python tests/load.py [url] [usuarios] [segundos]` |
+| Tests Django (24 tests, cobertura 89 %) | `cd backend && coverage run manage.py test` |
+| Tests de integración Go (cobertura 84,1 %) | `sh scripts/test-payments.sh` (con el stack levantado) |
 | SAST, auditoría de dependencias y DAST (OWASP ZAP) | CI y `docker compose --profile zap run --rm zap`; informe en [docs/seguridad/INFORME.md](docs/seguridad/INFORME.md) |
 | CI en cada push (tests, cobertura ≥ 80 %, auditorías) | `.github/workflows/ci.yml` |
 | Producción: TLS 1.3, HSTS, secretos obligatorios, healthchecks, backups diarios | `docker-compose.prod.yml`, `frontend/Caddyfile.prod`, [docs/DESPLIEGUE.md](docs/DESPLIEGUE.md) |
@@ -88,7 +91,7 @@ Pendientes: MFA, cifrado en reposo a nivel de aplicación (se delega al disco ci
 ```bash
 cd backend && python -m venv .venv && .venv/Scripts/pip install -r requirements.txt
 .venv/Scripts/python manage.py migrate && .venv/Scripts/python manage.py seed
-.venv/Scripts/python manage.py test        # 21 tests de reglas de negocio, RBAC y aislamiento
+.venv/Scripts/python manage.py test        # 24 tests de reglas de negocio, RBAC, MFA y aislamiento
 .venv/Scripts/python manage.py runserver
 cd frontend && npm install && npm run dev  # proxy a :8000 (Django) y :8081 (Go)
 ```

@@ -53,7 +53,8 @@ func newClinic(t *testing.T, a *App) fixture {
 	fx.clinic = exec(t, a, `INSERT INTO clinica_clinic (name) VALUES ($1) RETURNING id`, "Test "+n)
 	for _, role := range []string{"recepcion", "odontologo", "auditor"} {
 		uid := exec(t, a, `INSERT INTO clinica_user (password, is_superuser, username, first_name, last_name, email, is_staff,
-			is_active, date_joined, clinic_id, role, last_activity) VALUES ('!', false, $1, $2, 'Test', '', false, true, now(), $3, $2, now())
+			is_active, date_joined, clinic_id, role, last_activity, mfa_secret, mfa_enabled, mfa_last_step)
+			VALUES ('!', false, $1, $2, 'Test', '', false, true, now(), $3, $2, now(), '', true, 0)
 			RETURNING id`, role+n, role, fx.clinic)
 		key := fmt.Sprintf("%040x", seq.Add(1)*7919+time.Now().UnixNano())[:40]
 		exec(t, a, `INSERT INTO authtoken_token (key, created, user_id) VALUES ($1, now(), $2) RETURNING user_id`, key, uid)
@@ -121,6 +122,10 @@ func TestAuthAndRoles(t *testing.T) {
 	}
 	if s, _ := call(t, f, "GET", "/pay/health", "", nil); s != 200 {
 		t.Errorf("health: %d", s)
+	}
+	req := httptest.NewRequest("GET", "/pay/openapi.yaml", nil)
+	if res, _ := f.Test(req, -1); res.StatusCode != 200 || res.Header.Get("Content-Type") != "application/yaml" {
+		t.Errorf("openapi: %d %s", res.StatusCode, res.Header.Get("Content-Type"))
 	}
 }
 

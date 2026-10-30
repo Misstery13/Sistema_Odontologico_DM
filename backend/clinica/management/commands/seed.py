@@ -8,6 +8,8 @@ from clinica.models import (
 
 # solo datos demo: el contenedor no ejecuta seed en producción (DJANGO_ENV=production)
 DEMO_PASSWORD = "odonto123"  # nosec B105
+# secreto MFA común de los usuarios demo; el código actual se obtiene con `python tests/totp.py`
+DEMO_MFA_SECRET = "ODONTODMDEMOMFA2"  # nosec B105
 
 CONSENT_BODY = """Yo, {paciente}, con cédula {cedula}, declaro que el/la Dr(a). {odontologo} me explicó en lenguaje claro el procedimiento de {procedimiento}, su propósito, alternativas y los riesgos posibles: {riesgos}.
 
@@ -80,7 +82,10 @@ class Command(BaseCommand):
                 )
                 if created:
                     user.set_password(DEMO_PASSWORD)
+                    user.mfa_secret, user.mfa_enabled = DEMO_MFA_SECRET, True
                     user.save()
+                elif not user.mfa_secret:  # usuarios demo creados antes del MFA
+                    User.objects.filter(pk=user.pk).update(mfa_secret=DEMO_MFA_SECRET, mfa_enabled=True)
 
         for clinic in Clinic.objects.all():
             first_user = clinic.users.order_by("id").first()

@@ -24,6 +24,7 @@ router.register("commission-rules", views.CommissionRuleViewSet, basename="commi
 
 urlpatterns = [
     path("api/login/", views.login),
+    path("api/login/mfa/", views.login_mfa),
     path("api/health/", views.health),
     path("api/dentists/", views.dentists),
     path("api/reports/", views.reports),

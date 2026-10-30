@@ -3,3 +3,4 @@ djangorestframework>=3.18.2,<4
 psycopg[binary]>=3.2,<4
 gunicorn>=23,<24
 drf-spectacular>=0.28,<1
+segno>=1.6,<2

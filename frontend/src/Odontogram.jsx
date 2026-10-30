@@ -58,7 +58,7 @@ export function ToothGlyph({ n, tooth, onSurface, size = 40 }) {
   const map = sides(n);
   const t = tooth || { state: "sano", surfaces: {} };
   return (
-    <svg viewBox="0 0 40 40" width={size} height={size} aria-hidden="true" className="block">
+    <svg viewBox="0 0 40 40" width={size ?? "100%"} height={size ?? undefined} aria-hidden="true" className="block">
       <g opacity={t.state === "extraido" ? 0.3 : 1}>
         {Object.entries(POLY).map(([side, points]) => (
           <polygon key={side} points={points} fill={FILL[t.surfaces?.[map[side]]] || "white"} stroke="var(--color-print)" strokeWidth="1"
@@ -166,7 +166,10 @@ export default function Odontogram({ patientId, teeth, setTeeth }) {
       )}
       <div className="overflow-x-auto px-5 py-5">
         {ARCHES[dentition].map((row, i) => (
-          <div key={i} className={`mx-auto flex w-max gap-1.5 ${i ? "mt-3 border-t border-print pt-3" : ""}`}>
+          // grilla fluida: la arcada completa entra en el ancho de una tablet junto al sillón (RNF-07)
+          <div key={i} className={`mx-auto grid gap-1 ${dentition === "temporal"
+            ? "max-w-[620px] min-w-[360px] grid-cols-[repeat(5,minmax(0,1fr))_14px_repeat(5,minmax(0,1fr))]"
+            : "max-w-[1000px] min-w-[560px] grid-cols-[repeat(8,minmax(0,1fr))_14px_repeat(8,minmax(0,1fr))]"} ${i ? "mt-3 border-t border-print pt-3" : ""}`}>
             {row.map((n, j) => {
               const t = teeth[n];
               const label = notation === "fdi" ? n : universal(n);
@@ -174,9 +177,9 @@ export default function Odontogram({ patientId, teeth, setTeeth }) {
               return (
                 <button key={n} onClick={() => paintTooth(n)} disabled={!canEdit}
                   aria-label={`Pieza ${label}: ${TOOTH_STATES[t?.state || "sano"]}${findings.length ? `; ${findings.join(", ")}` : ""}`}
-                  className={`flex flex-col items-center gap-1 rounded-[3px] p-0.5 enabled:hover:bg-rule/40 ${j === row.length / 2 ? "ml-4" : ""} ${i ? "flex-col-reverse" : ""}`}>
+                  className={`flex flex-col items-center gap-1 rounded-[3px] p-0.5 enabled:hover:bg-rule/40 ${j === row.length / 2 ? (dentition === "temporal" ? "col-start-7" : "col-start-10") : ""} ${i ? "flex-col-reverse" : ""}`}>
                   <span className="text-xs font-semibold">{label}</span>
-                  <ToothGlyph n={n} tooth={t} onSurface={canEdit ? (s) => paintSurface(n, s) : null} size={dentition === "temporal" ? 64 : 56} />
+                  <ToothGlyph n={n} tooth={t} onSurface={canEdit ? (s) => paintSurface(n, s) : null} size={null} />
                 </button>
               );
             })}

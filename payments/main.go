@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"errors"
 	"fmt"
 	"log"
@@ -42,6 +43,11 @@ type session struct{ user, clinic int64; role string }
 type querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
+
+// especificación OpenAPI 3 de este servicio, servida en /pay/openapi.yaml
+//
+//go:embed openapi.yaml
+var openapiSpec []byte
 
 var methods = map[string]bool{"efectivo": true, "tarjeta": true, "transferencia": true, "seguro": true}
 
@@ -115,6 +121,10 @@ func (a *App) routes() *fiber.App {
 			return fail(c, 503, "base de datos no disponible")
 		}
 		return c.JSON(fiber.Map{"status": "ok"})
+	})
+	f.Get("/pay/openapi.yaml", func(c *fiber.Ctx) error {
+		c.Set(fiber.HeaderContentType, "application/yaml")
+		return c.Send(openapiSpec)
 	})
 	api := f.Group("/pay", a.auth)
 	api.Get("/patients/:id/balance", allow(readers), a.balance)

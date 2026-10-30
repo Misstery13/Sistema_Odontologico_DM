@@ -2,7 +2,9 @@ import hmac
 import secrets
 from datetime import timedelta
 
+from django.conf import settings
 from django.contrib.auth import authenticate
+from django.core import signing
 from django.db import connection, transaction
 from django.db.models import Count, F, Q, Sum
 from django.utils import timezone
@@ -12,7 +14,9 @@ from rest_framework.decorators import action, api_view, authentication_classes, 
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
-from rest_framework.throttling import AnonRateThrottle
+from rest_framework.throttling import ScopedRateThrottle
+
+from . import mfa
 
 from .auth import RolePermission
 from .models import (
@@ -445,20 +449,65 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
         return qs[:300]  # ponytail: últimos 300; paginar cuando el volumen lo pida
 
 
-@api_view(["POST"])
-@authentication_classes([])
-@permission_classes([AllowAny])
-@throttle_classes([AnonRateThrottle])
-def login(request):
-    user = authenticate(username=request.data.get("username"), password=request.data.get("password"))
-    if not user or not user.clinic_id:
-        return Response({"detail": "Usuario o contraseña incorrectos"}, status=400)
+MFA_SALT = "odonto-mfa"
+MFA_TICKET_SECONDS = 300
+
+
+def start_session(user):
     Token.objects.filter(user=user).delete()  # sesión nueva en cada ingreso
     token = Token.objects.create(user=user)
     User.objects.filter(pk=user.pk).update(last_activity=timezone.now())
     return Response(
         {"token": token.key, "id": user.pk, "user": user.get_full_name() or user.username, "role": user.role, "clinic": user.clinic.name}
     )
+
+
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+@throttle_classes([ScopedRateThrottle])
+def login(request):
+    """Paso 1: usuario y contraseña. Con MFA activo no entrega sesión, sino un ticket de 5 min para el paso 2."""
+    user = authenticate(username=request.data.get("username"), password=request.data.get("password"))
+    if not user or not user.clinic_id:
+        return Response({"detail": "Usuario o contraseña incorrectos"}, status=400)
+    if not settings.MFA_REQUIRED:
+        return start_session(user)
+    ticket = signing.dumps({"u": user.pk}, salt=MFA_SALT)
+    if user.mfa_enabled:
+        return Response({"mfa": "verify", "ticket": ticket})
+    if not user.mfa_secret:  # primer ingreso: se enrola el segundo factor
+        user.mfa_secret = mfa.new_secret()
+        user.save(update_fields=["mfa_secret"])
+    return Response({
+        "mfa": "setup", "ticket": ticket, "secret": user.mfa_secret,
+        "qr": mfa.provisioning_qr(user.mfa_secret, user.username, settings.MFA_ISSUER),
+    })
+
+
+login.cls.throttle_scope = "login"
+
+
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+@throttle_classes([ScopedRateThrottle])
+def login_mfa(request):
+    """Paso 2: código TOTP de la app autenticadora. El primer código válido confirma el enrolamiento."""
+    try:
+        data = signing.loads(str(request.data.get("ticket", "")), salt=MFA_SALT, max_age=MFA_TICKET_SECONDS)
+        user = User.objects.select_related("clinic").get(pk=data["u"], is_active=True)
+    except (signing.BadSignature, User.DoesNotExist):
+        return Response({"detail": "El ingreso venció; vuelve a escribir tu usuario y contraseña"}, status=400)
+    step = mfa.verify(user.mfa_secret, request.data.get("code", ""), user.mfa_last_step)
+    if step is None:
+        return Response({"detail": "Código incorrecto o ya utilizado"}, status=400)
+    user.mfa_last_step, user.mfa_enabled = step, True
+    user.save(update_fields=["mfa_last_step", "mfa_enabled"])
+    return start_session(user)
+
+
+login_mfa.cls.throttle_scope = "mfa"
 
 
 @api_view(["GET"])

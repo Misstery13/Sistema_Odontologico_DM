@@ -141,13 +141,16 @@ function NewBudget({ patient, onCreated }) {
 }
 
 // RF-07/08: presupuesto por fases, aprobación total o parcial, ítems aprobados pasan a la agenda
-export default function Budgets({ patient }) {
+export default function Budgets({ patient, onChange }) {
   const [list, setList] = useState(null);
   const load = () => api(`/api/budgets/?patient=${patient.id}`).then(setList);
   useEffect(() => {
     load();
   }, [patient.id]);
-  const replace = (b) => setList(list.map((x) => (x.id === b.id ? b : x)));
+  const replace = (b) => {
+    setList(list.map((x) => (x.id === b.id ? b : x)));
+    onChange?.();
+  };
 
   return (
     <section className="sheet">

@@ -11,6 +11,8 @@ import urllib.error
 import urllib.request
 from datetime import date, timedelta
 
+from totp import totp
+
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8080"
 PASSWORD = "odonto123"
 results = []
@@ -40,9 +42,17 @@ def check(req, name, ok, detail=""):
 
 
 def login(user):
+    """Contraseña + código TOTP (secreto demo). Si el código del paso actual ya se usó, espera al siguiente."""
     status, data, _ = call("POST", "/api/login/", body={"username": user, "password": PASSWORD})
     assert status == 200, f"login {user}: {status} {data}"
-    return data["token"]
+    if "token" in data:  # MFA desactivado (MFA_REQUIRED=0)
+        return data["token"]
+    for _ in range(2):
+        status, session, _ = call("POST", "/api/login/mfa/", body={"ticket": data["ticket"], "code": totp("ODONTODMDEMOMFA2")})
+        if status == 200:
+            return session["token"]
+        time.sleep(31 - time.time() % 30)
+    raise AssertionError(f"MFA {user}: {status} {session}")
 
 
 def main():
@@ -54,6 +64,10 @@ def main():
     s, _, _ = call("POST", "/api/login/", body={"username": "recepcion", "password": "mala"})
     check("RNF-05", "credenciales inválidas rechazadas", s == 400, s)
     check("RNF-05", "sin token no hay acceso", call("GET", "/api/patients/")[0] == 401)
+    s, step1, _ = call("POST", "/api/login/", body={"username": "auditor", "password": PASSWORD})
+    check("RNF-05", "la contraseña sola no entrega sesión (MFA)", s == 200 and "token" not in step1 and step1.get("mfa") == "verify", step1)
+    s, _, _ = call("POST", "/api/login/mfa/", body={"ticket": step1.get("ticket"), "code": "000000"})
+    check("RNF-05", "código MFA incorrecto rechazado", s == 400, s)
     check("RNF-05", "admin sin acceso a datos clínicos (menor privilegio)", call("GET", "/api/patients/", AD)[0] == 403)
     check("RNF-05", "recepción no escribe notas clínicas", call("POST", "/api/notes/", R, {"patient": 1, "subjective": "x"})[0] == 403)
     s, _, h = call("GET", "/")

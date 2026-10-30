@@ -1,0 +1,166 @@
+openapi: 3.0.3
+info:
+  title: Odonto DM · Servicio de caja y facturación
+  version: 1.0.0
+  description: |
+    Cobros contra el saldo de tratamientos, comprobantes electrónicos (adaptador SRI simulado),
+    cierre de caja ciego (RN-02) e ingresos por método de pago.
+    Autenticación: el mismo token de sesión de la API clínica (`Authorization: Token <clave>`),
+    que caduca tras 15 minutos de inactividad. Todo se limita a la clínica del usuario.
+servers:
+  - url: /pay
+security:
+  - token: []
+components:
+  securitySchemes:
+    token:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: "Token <clave> obtenido en POST /api/login/ + /api/login/mfa/"
+  schemas:
+    Error:
+      type: object
+      properties:
+        detail: { type: string }
+    Payment:
+      type: object
+      properties:
+        id: { type: integer }
+        amount: { type: number, example: 40.5 }
+        method: { type: string, enum: [efectivo, tarjeta, transferencia, seguro] }
+        invoice_number: { type: string, example: "001-001-000000123" }
+        created_at: { type: string, format: date-time }
+    Closing:
+      type: object
+      properties:
+        day: { type: string, format: date }
+        counted: { type: number }
+        expected: { type: number, description: Efectivo registrado por el sistema; solo se revela después del conteo }
+        difference: { type: number, description: "contado − esperado (negativo = faltante)" }
+  responses:
+    Unauthorized:
+      description: Sin token, token inválido o sesión inactiva
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    Forbidden:
+      description: El rol no tiene permiso para esta acción
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    NotFound:
+      description: Paciente inexistente o de otra clínica
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+paths:
+  /health:
+    get:
+      summary: Estado del servicio y de la base de datos
+      security: []
+      responses:
+        "200": { description: OK }
+        "503": { description: Base de datos no disponible }
+  /patients/{id}/balance:
+    get:
+      summary: Saldo pendiente del paciente (tratamientos − pagos)
+      description: "Roles: recepcion, odontologo, asistente, auditor."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: Saldo en USD
+          content: { application/json: { schema: { type: object, properties: { balance: { type: number } } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /patients/{id}/payments:
+    get:
+      summary: Pagos del paciente, del más reciente al más antiguo
+      description: "Roles: recepcion, odontologo, asistente, auditor."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: Lista de pagos
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Payment" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /payments:
+    post:
+      summary: Registrar un cobro y emitir su comprobante
+      description: |
+        Rol: recepcion. Bloquea la fila del paciente (`FOR UPDATE`): cobros simultáneos nunca superan el saldo.
+        Pagos mixtos = varios cobros con métodos distintos.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [patient_id, amount, method]
+              properties:
+                patient_id: { type: integer }
+                amount: { type: number, minimum: 0.01 }
+                method: { type: string, enum: [efectivo, tarjeta, transferencia, seguro] }
+      responses:
+        "201":
+          description: Cobro registrado
+          content: { application/json: { schema: { $ref: "#/components/schemas/Payment" } } }
+        "400": { description: Monto o método inválido, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { description: El monto excede el saldo pendiente, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /cash-closings:
+    post:
+      summary: Cierre de caja ciego del día (RN-02)
+      description: "Rol: recepcion. Se registra el conteo físico; recién entonces se devuelve el total del sistema. Un cierre por clínica y día."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [counted], properties: { counted: { type: number, minimum: 0 } } }
+      responses:
+        "201":
+          description: Caja cerrada
+          content: { application/json: { schema: { $ref: "#/components/schemas/Closing" } } }
+        "400": { description: Conteo inválido }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { description: La caja de hoy ya fue cerrada }
+    get:
+      summary: Historial de cierres (últimos 60)
+      description: "Roles: admin, auditor (la recepción nunca ve totales teóricos)."
+      responses:
+        "200":
+          description: Cierres
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  allOf:
+                    - $ref: "#/components/schemas/Closing"
+                    - type: object
+                      properties: { user: { type: string } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /reports/income:
+    get:
+      summary: Ingresos del período por método de pago
+      description: "Roles: admin, auditor. Fechas en hora de Ecuador (America/Guayaquil)."
+      parameters:
+        - { name: from, in: query, required: true, schema: { type: string, format: date } }
+        - { name: to, in: query, required: true, schema: { type: string, format: date } }
+      responses:
+        "200":
+          description: Totales por método
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    method: { type: string }
+                    count: { type: integer }
+                    amount: { type: number }
+        "400": { description: Rango de fechas inválido }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }

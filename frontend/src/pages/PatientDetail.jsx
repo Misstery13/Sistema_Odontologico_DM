@@ -18,6 +18,7 @@ export default function PatientDetail() {
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState("");
   const [rev, setRev] = useState(0); // se incrementa al registrar un tratamiento para refrescar el saldo
+  const [planRev, setPlanRev] = useState(0); // se incrementa al decidir un presupuesto para refrescar "Por tratar"
 
   useEffect(() => {
     api(`/api/patients/${id}/`).then(setPatient).catch((e) => setError(e.message));
@@ -62,11 +63,11 @@ export default function PatientDetail() {
           <span className="text-xs font-semibold tracking-[0.1em] lg:[writing-mode:vertical-rl] lg:rotate-180">HC {String(patient.id).padStart(6, "0")}</span>
         </div>
         <PatientData patient={patient} onEdit={is("recepcion", "odontologo") ? () => setEditing(true) : null} />
-        <Treatments patientId={id} teeth={teeth} onChange={() => setRev(rev + 1)} />
+        <Treatments patientId={id} teeth={teeth} planRev={planRev} onChange={() => setRev(rev + 1)} />
         <Payments patientId={id} rev={rev} />
       </article>
       <Odontogram patientId={id} teeth={teeth} setTeeth={setTeeth} />
-      {is("odontologo", "asistente", "recepcion") && <ClinicalRecord patient={patient} teeth={teeth} />}
+      {is("odontologo", "asistente", "recepcion") && <ClinicalRecord patient={patient} teeth={teeth} onPlanChange={() => setPlanRev(planRev + 1)} />}
     </div>
   );
 }
@@ -143,7 +144,7 @@ function PatientData({ patient, onEdit }) {
   );
 }
 
-function Treatments({ patientId, teeth, onChange }) {
+function Treatments({ patientId, teeth, planRev, onChange }) {
   const [items, setItems] = useState([]);
   const [catalog, setCatalog] = useState([]);
   const [planned, setPlanned] = useState([]); // ítems aprobados del presupuesto, aún no realizados
@@ -154,6 +155,9 @@ function Treatments({ patientId, teeth, onChange }) {
     api(`/api/treatments/?patient=${patientId}`).then(setItems);
     if (is("odontologo")) api(`/api/budgets/pending/?patient=${patientId}`).then(setPlanned);
   };
+  useEffect(() => {
+    if (planRev && is("odontologo")) api(`/api/budgets/pending/?patient=${patientId}`).then(setPlanned);
+  }, [planRev]);
   useEffect(() => {
     load();
     if (is("odontologo")) api("/api/procedures/").then((l) => setCatalog(l.filter((p) => p.active)));
@@ -211,7 +215,7 @@ function Treatments({ patientId, teeth, onChange }) {
         ))}
         {!items.length && <li className="py-2 text-sm text-pencil">Sin tratamientos registrados.</li>}
       </ul>
-      {is("odontologo") && <form onSubmit={submit} className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
+      {is("odontologo") && <form onSubmit={submit} className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3">
         <label className="col-span-full"><span className="label">Procedimiento realizado</span>
           <select className="field" value={source} onChange={(e) => setSource(e.target.value)} required>
             <option value="" disabled>Elegir…</option>
@@ -235,7 +239,7 @@ function Treatments({ patientId, teeth, onChange }) {
         <label className="col-span-2"><span className="label">Notas</span><input name="notes" className="field" /></label>
         {price !== null && <p className="col-span-full text-sm text-pencil">Se cargará {money(price)} al saldo y se descargarán los insumos de la receta estándar.</p>}
         {error && <p className="error col-span-full" role="alert">{error}</p>}
-        <button className="btn col-span-full sm:col-span-2 sm:col-start-3">Registrar tratamiento</button>
+        <button className="btn col-span-full">Registrar tratamiento</button>
       </form>}
     </Panel>
   );
@@ -419,7 +423,7 @@ const TABS = {
   consentimientos: ["Consentimientos", ["odontologo", "asistente"]],
 };
 
-function ClinicalRecord({ patient, teeth }) {
+function ClinicalRecord({ patient, teeth, onPlanChange }) {
   const tabs = Object.entries(TABS).filter(([, [, roles]]) => is(...roles));
   const [tab, setTab] = useState(tabs[0][0]);
   return (
@@ -435,7 +439,7 @@ function ClinicalRecord({ patient, teeth }) {
       <div role="tabpanel">
         {tab === "soep" && <Notes patientId={patient.id} />}
         {tab === "perio" && <Perio patient={patient} teeth={teeth} />}
-        {tab === "presupuestos" && <Budgets patient={patient} />}
+        {tab === "presupuestos" && <Budgets patient={patient} onChange={onPlanChange} />}
         {tab === "recetas" && <Prescriptions patient={patient} />}
         {tab === "consentimientos" && <Consents patient={patient} />}
       </div>
