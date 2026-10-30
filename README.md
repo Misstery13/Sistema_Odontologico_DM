@@ -21,7 +21,7 @@ navegador ──► caddy :8080 ──► /api/*  → backend (Django)  ─┐
 docker compose up --build
 ```
 
-Abrir http://localhost:8080 (usuarios en la tabla de roles más abajo). El ingreso pide un código de verificación (MFA). Los usuarios demo comparten un secreto fijo: `python tests/totp.py` muestra el código vigente, o se puede cargar el secreto `ODONTODMDEMOMFA2` en cualquier app autenticadora. Para producción: [docs/DESPLIEGUE.md](docs/DESPLIEGUE.md).
+Abrir http://localhost:8080 (usuarios en la tabla de roles más abajo). Si el puerto 8080 está ocupado en tu equipo, crea un `.env` con `HTTP_PORT=8088` (u otro libre) y pasa esa URL a los scripts de prueba, por ejemplo `python tests/uat.py http://127.0.0.1:8088`. El ingreso pide un código de verificación (MFA). Los usuarios demo comparten un secreto fijo: `python tests/totp.py` muestra el código vigente, o se puede cargar el secreto `ODONTODMDEMOMFA2` en cualquier app autenticadora. Para producción: [docs/DESPLIEGUE.md](docs/DESPLIEGUE.md).
 
 ## Alcance implementado (SRS SIGO-Dental, Fases 1 a 4)
 
