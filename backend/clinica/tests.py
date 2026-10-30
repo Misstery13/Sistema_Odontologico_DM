@@ -530,3 +530,24 @@ class CorrectionsTests(APITestCase):
         call_command("send_reminders")
         kinds = list(Notification.objects.filter(appointment_id=a["id"]).order_by("id").values_list("kind", flat=True))
         self.assertEqual(kinds, ["confirmacion", "recordatorio_48h", "reprogramacion", "recordatorio_48h"])
+
+
+class SeedTests(APITestCase):
+    def test_demo_history_is_consistent_and_idempotent(self):
+        from io import StringIO
+        from .models import Appointment, Supply, Treatment
+        from .models import sign
+        call_command("seed", stdout=StringIO())
+        counts = (Appointment.objects.count(), Treatment.objects.count(), ClinicalNote.objects.count())
+        call_command("seed", stdout=StringIO())  # el segundo arranque no duplica nada
+        self.assertEqual((Appointment.objects.count(), Treatment.objects.count(), ClinicalNote.objects.count()), counts)
+        self.assertTrue(Appointment.objects.filter(dentist__username="dra.lopez", status="atendido").exists())
+        active = list(Appointment.objects.exclude(status__in=Appointment.INACTIVE))
+        for a in active:  # RN-03: ni el odontólogo ni el sillón tienen dos citas a la vez
+            for b in active:
+                if a.pk < b.pk and (a.dentist_id == b.dentist_id or a.chair_id == b.chair_id):
+                    self.assertFalse(a.start < b.start + timedelta(minutes=b.minutes) and b.start < a.start + timedelta(minutes=a.minutes), (a.pk, b.pk))
+        for n in ClinicalNote.objects.all():  # firmas válidas leídas de la base
+            self.assertEqual(n.signature, sign(n.author_id, n.created_at.isoformat(), n.subjective, n.objective, n.assessment, n.plan))
+        self.assertTrue(Treatment.objects.filter(voided=True).exists())
+        self.assertTrue(any(s.stock <= s.min_stock for s in Supply.objects.filter(clinic__name="Clínica Sonrisa")))

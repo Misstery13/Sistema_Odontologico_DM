@@ -51,7 +51,7 @@ Si ya estaba clonado: `cd Sistema_Odontologico_DM && git pull`.
 
 Por defecto **no** se cargan (`SEED_DEMO=0`): la clínica se crea vacía y con contraseñas propias.
 
-Para **exhibir el proyecto** (revisión, presentación) se puede poner `SEED_DEMO=1` en `.env.funnel` después del primer arranque y repetir el paso 4. Se cargan los usuarios demo (`dra.lopez`, `recepcion`, `asistente`, `auditor`, `admin`; clave `odonto123`) con el secreto MFA público `ODONTODMDEMOMFA2`.
+Para **exhibir el proyecto** (revisión, presentación) se puede poner `SEED_DEMO=1` en `.env.funnel` después del primer arranque y repetir el paso 4. Se cargan los usuarios demo y un historial ficticio de cinco semanas (agenda, tratamientos, cobros y cierres de caja; ver «Datos demo» en el README): `dra.lopez`, `recepcion`, `asistente`, `auditor`, `admin`; clave `odonto123`, con el secreto MFA público `ODONTODMDEMOMFA2`.
 
 > **Advertencia:** con `SEED_DEMO=1`, cualquiera en internet que lea el README puede entrar a la clínica demo. Úsalo solo con datos ficticios.
 

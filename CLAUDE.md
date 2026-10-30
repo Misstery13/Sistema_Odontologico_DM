@@ -38,7 +38,7 @@ Guía completa: **`docs/despliegue/tailscale-funnel.md`**. El camino normal es:
 
 ## Desarrollo y pruebas (en la máquina de desarrollo)
 
-- Backend: `cd backend && python manage.py test` (35 tests).
+- Backend: `cd backend && python manage.py test` (36 tests).
 - Servicio Go: `sh scripts/test-payments.sh` (con el stack de desarrollo levantado).
 - Aceptación: `python tests/uat.py [url]`.
 - Carga: `python tests/load.py [url] 150 90`.

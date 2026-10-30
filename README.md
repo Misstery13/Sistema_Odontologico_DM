@@ -66,7 +66,7 @@ Pendientes: cifrado en reposo a nivel de aplicación (se delega al disco cifrado
 | Pruebas de aceptación (68 criterios, contra el sistema desplegado) | `python tests/uat.py [url]` |
 | Prueba de carga (150 usuarios concurrentes) | `python tests/load.py [url] [usuarios] [segundos]` |
 | Pruebas de navegador (Chromium, Firefox, WebKit; escritorio, laptop, iPad) | `cd tests/e2e && npm i && npx playwright install && npx playwright test` |
-| Tests Django (35 tests, cobertura 89 %) | `cd backend && coverage run manage.py test` |
+| Tests Django (36 tests, cobertura 89 %) | `cd backend && coverage run manage.py test` |
 | Tests de integración Go (cobertura 85,3 %) | `sh scripts/test-payments.sh` (con el stack levantado) |
 | SAST, auditoría de dependencias y DAST (OWASP ZAP) | CI y `docker compose --profile zap run --rm zap`; informe en [docs/seguridad/INFORME.md](docs/seguridad/INFORME.md) |
 | CI en cada push: tests, cobertura ≥ 80 %, auditorías y, con el sistema levantado en Docker, UAT, carga y navegadores | `.github/workflows/ci.yml` |
@@ -82,6 +82,17 @@ Pendientes: cifrado en reposo a nivel de aplicación (se delega al disco cifrado
 | `auditor` | Auditor / contador | Reportes (incluido consumo por consultorio y profesional), honorarios, inventario, cierres de caja, auditoría |
 | `admin` | Administrador TI | Usuarios (alta, rol, desactivar, contraseña temporal, reinicio de MFA), catálogos, reportes, inventario, cierres de caja, auditoría (sin datos clínicos) |
 | `dr.vega`, `recepcion.norte` | Dental Norte | Otra clínica: sirve para comprobar el aislamiento |
+
+### Datos demo
+
+`manage.py seed` (se ejecuta al arrancar el backend fuera de producción o con `SEED_DEMO=1`) carga, además de usuarios y catálogos, un historial ficticio con fechas relativas al día de arranque:
+
+- **Pacientes:** 20 en Clínica Sonrisa y 6 en Dental Norte, con cédulas válidas. Algunos tienen alergias, anticoagulación, coagulopatía o enfermedades sistémicas, para que se vean las alertas.
+- **Agenda:** cinco semanas de citas pasadas (atendidas, canceladas y no asistidas), las de hoy en distintos estados y las de las dos semanas siguientes. No hay solapes de odontólogo ni de sillón.
+- **Registro clínico:** tratamientos del catálogo con descargo de insumos (dos anulados por registro duplicado), odontograma con su historial, notas SOEP firmadas, signos vitales, consentimientos firmados, recetas y presupuestos pendientes. Las limas de endodoncia quedan bajo el mínimo, para que aparezca la alerta de stock.
+- **Caja:** cobros en efectivo, con tarjeta y por transferencia (dos por clínica anulados con nota de crédito) y cierres de caja de los días pasados, tres de ellos con faltante o sobrante. Algunos pacientes quedan con saldo pendiente. La caja de **hoy** queda abierta, para probar el cierre ciego.
+
+El historial se carga una sola vez; los arranques siguientes no duplican nada. Con SQLite (desarrollo sin Docker) se omiten los cobros y cierres, que viven en las tablas del servicio de caja en PostgreSQL.
 
 ## Integraciones simuladas
 
@@ -108,7 +119,7 @@ Las integraciones que necesitan cuentas o certificados reales funcionan con **ad
 ```bash
 cd backend && python -m venv .venv && .venv/Scripts/pip install -r requirements.txt
 .venv/Scripts/python manage.py migrate && .venv/Scripts/python manage.py seed
-.venv/Scripts/python manage.py test        # 35 tests de reglas de negocio, RBAC, MFA, usuarios, archivos, inventario y aislamiento
+.venv/Scripts/python manage.py test        # 36 tests de reglas de negocio, RBAC, MFA, usuarios, archivos, inventario y aislamiento
 .venv/Scripts/python manage.py runserver
 cd frontend && npm install && npm run dev  # proxy a :8000 (Django) y :8081 (Go)
 ```
